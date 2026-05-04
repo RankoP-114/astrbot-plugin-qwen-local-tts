@@ -219,7 +219,8 @@
   "request_timeout": {
     "description": "TTS 请求超时秒数",
     "type": "float",
-    "default": 180.0
+    "default": 180.0,
+    "hint": "插件会把略短于此值的等待超时传给 Worker，让 Worker 先返回 504 并取消未开始的排队任务。"
   },
   "max_queue_size": {
     "description": "Worker 最大排队任务数",

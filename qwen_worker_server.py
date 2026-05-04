@@ -5,10 +5,10 @@ import io
 import json
 import logging
 import os
-import queue
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -30,9 +30,14 @@ LOCK = threading.Lock()
 ACTIVE_LOCK = threading.Lock()
 ACTIVE_REQUEST: dict[str, Any] | None = None
 QUEUE_LOCK = threading.Lock()
+JOB_AVAILABLE = threading.Condition(QUEUE_LOCK)
 QUEUED_REQUESTS: dict[str, dict[str, Any]] = {}
 REJECTED_REQUESTS = 0
 LAST_REJECTED_REQUEST: dict[str, Any] | None = None
+TIMED_OUT_REQUESTS = 0
+CANCELLED_QUEUED_REQUESTS = 0
+ORPHANED_ACTIVE_REQUESTS = 0
+LAST_TIMED_OUT_REQUEST: dict[str, Any] | None = None
 SYNTHESIS_THREAD: threading.Thread | None = None
 LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
@@ -47,6 +52,7 @@ class SynthesizeRequest(BaseModel):
     reference_audio_file: str = ""
     reference_text: str = ""
     x_vector_only_mode: Optional[bool] = None
+    wait_timeout: Optional[float] = None
 
 
 class VoiceConfigRequest(BaseModel):
@@ -61,12 +67,14 @@ class SynthesisJob:
     request_id: str
     request: SynthesizeRequest
     created_at: float
+    started: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     result: bytes | None = None
     error: Exception | None = None
 
 
-JOB_QUEUE: queue.Queue[SynthesisJob] = queue.Queue()
+JOB_QUEUE: deque[SynthesisJob] = deque()
 
 
 def dtype_from_str(value: str) -> torch.dtype:
@@ -101,8 +109,21 @@ def int_from_config(value: Any, default: int) -> int:
         return default
 
 
+def float_from_config(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def configured_max_queue_size() -> int:
     return max(1, int_from_config(CONFIG.get("max_queue_size"), 4))
+
+
+def configured_wait_timeout(req: SynthesizeRequest) -> float:
+    if req.wait_timeout is not None:
+        return max(1.0, float_from_config(req.wait_timeout, 180.0))
+    return max(1.0, float_from_config(CONFIG.get("request_timeout"), 180.0))
 
 
 def debug_enabled() -> bool:
@@ -168,6 +189,7 @@ def queue_request_snapshot(job: SynthesisJob) -> dict[str, Any]:
         "tone": (req.tone or "").strip(),
         "voice_key": (req.voice_key or "").strip(),
         "voice_file_name": os.path.basename(voice_file) if voice_file else "",
+        "status": "queued",
         "created_at": job.created_at,
     }
 
@@ -185,17 +207,24 @@ def record_queue_rejection(job: SynthesisJob, queued_count: int, max_queue_size:
 
 def try_add_queued_request(job: SynthesisJob) -> tuple[bool, int, int]:
     max_queue_size = configured_max_queue_size()
-    with QUEUE_LOCK:
+    with JOB_AVAILABLE:
         queued_count = len(QUEUED_REQUESTS)
         if queued_count >= max_queue_size:
             return False, queued_count, max_queue_size
         QUEUED_REQUESTS[job.request_id] = queue_request_snapshot(job)
+        JOB_QUEUE.append(job)
+        JOB_AVAILABLE.notify()
         return True, queued_count + 1, max_queue_size
 
 
-def remove_queued_request(request_id: str) -> None:
-    with QUEUE_LOCK:
-        QUEUED_REQUESTS.pop(request_id, None)
+def get_next_queued_job() -> SynthesisJob:
+    with JOB_AVAILABLE:
+        while not JOB_QUEUE:
+            JOB_AVAILABLE.wait()
+        job = JOB_QUEUE.popleft()
+        job.started.set()
+        QUEUED_REQUESTS.pop(job.request_id, None)
+        return job
 
 
 def queued_requests_snapshot() -> list[dict[str, Any]]:
@@ -205,6 +234,9 @@ def queued_requests_snapshot() -> list[dict[str, Any]]:
     for item in snapshots:
         created_at = float(item.pop("created_at", now))
         item["queued_for"] = round(now - created_at, 3)
+        cancelled_at = item.pop("cancelled_at", None)
+        if cancelled_at is not None:
+            item["cancelled_for"] = round(now - float(cancelled_at), 3)
     return snapshots
 
 
@@ -219,6 +251,54 @@ def queue_rejection_snapshot() -> dict[str, Any]:
     return {
         "rejected_requests": rejected_count,
         "last_rejected_request": last_rejected or None,
+    }
+
+
+def record_job_wait_timeout(job: SynthesisJob, wait_timeout: float) -> str:
+    global TIMED_OUT_REQUESTS, CANCELLED_QUEUED_REQUESTS
+    global ORPHANED_ACTIVE_REQUESTS, LAST_TIMED_OUT_REQUEST
+    now = time.monotonic()
+    with JOB_AVAILABLE:
+        if job.done.is_set():
+            return "completed"
+        TIMED_OUT_REQUESTS += 1
+        snapshot = queue_request_snapshot(job)
+        snapshot["wait_timeout"] = wait_timeout
+        snapshot["timed_out_at"] = now
+        if job.started.is_set():
+            ORPHANED_ACTIVE_REQUESTS += 1
+            snapshot["status"] = "active_orphaned"
+            LAST_TIMED_OUT_REQUEST = snapshot
+            return "active_orphaned"
+
+        CANCELLED_QUEUED_REQUESTS += 1
+        job.cancelled.set()
+        try:
+            JOB_QUEUE.remove(job)
+        except ValueError:
+            pass
+        QUEUED_REQUESTS.pop(job.request_id, None)
+        job.done.set()
+        snapshot["status"] = "queued_cancelled"
+        LAST_TIMED_OUT_REQUEST = snapshot
+        return "queued_cancelled"
+
+
+def queue_timeout_snapshot() -> dict[str, Any]:
+    now = time.monotonic()
+    with QUEUE_LOCK:
+        timed_out_count = TIMED_OUT_REQUESTS
+        cancelled_count = CANCELLED_QUEUED_REQUESTS
+        orphaned_count = ORPHANED_ACTIVE_REQUESTS
+        last_timed_out = dict(LAST_TIMED_OUT_REQUEST or {})
+    if last_timed_out:
+        timed_out_at = float(last_timed_out.pop("timed_out_at", now))
+        last_timed_out["timed_out_for"] = round(now - timed_out_at, 3)
+    return {
+        "timed_out_requests": timed_out_count,
+        "cancelled_queued_requests": cancelled_count,
+        "orphaned_active_requests": orphaned_count,
+        "last_timed_out_request": last_timed_out or None,
     }
 
 
@@ -298,7 +378,6 @@ def cached_voice_prompt(path: str) -> list[VoiceClonePromptItem]:
 def prepare_voice_for_request(
     req: SynthesizeRequest,
 ) -> tuple[list[VoiceClonePromptItem] | None, str, str | None, bool, str, str]:
-    global VOICE_PROMPT
     request_voice_file = (req.voice_file or "").strip()
     request_reference_audio = (req.reference_audio_file or "").strip()
     request_reference_text = (req.reference_text or "").strip()
@@ -316,18 +395,8 @@ def prepare_voice_for_request(
     with LOCK:
         if voice_file:
             voice_prompt = cached_voice_prompt(voice_file)
-            VOICE_PROMPT = voice_prompt
-            CONFIG["voice_file"] = voice_file
-            CONFIG["reference_audio_file"] = reference_audio
-            CONFIG["reference_text"] = reference_text
-            CONFIG["x_vector_only_mode"] = use_xvec
             return voice_prompt, reference_audio, reference_text or None, use_xvec, "voice_prompt", voice_file
 
-        VOICE_PROMPT = None
-        CONFIG["voice_file"] = ""
-        CONFIG["reference_audio_file"] = reference_audio
-        CONFIG["reference_text"] = reference_text
-        CONFIG["x_vector_only_mode"] = use_xvec
         return None, reference_audio, reference_text or None, use_xvec, "reference_audio", ""
 
 
@@ -404,15 +473,13 @@ def synthesize_audio(req: SynthesizeRequest, request_id: str) -> bytes:
 
 def synthesis_worker_loop() -> None:
     while True:
-        job = JOB_QUEUE.get()
-        remove_queued_request(job.request_id)
+        job = get_next_queued_job()
         try:
             job.result = synthesize_audio(job.request, job.request_id)
         except Exception as exc:
             job.error = exc
         finally:
             job.done.set()
-            JOB_QUEUE.task_done()
 
 
 def start_synthesis_worker() -> None:
@@ -472,6 +539,7 @@ def health(request: Request) -> dict[str, Any]:
         "queued_count": len(queued_requests),
         "queued_requests": queued_requests,
         **queue_rejection_snapshot(),
+        **queue_timeout_snapshot(),
         **voice_config_snapshot(),
     }
 
@@ -544,17 +612,37 @@ def synthesize(req: SynthesizeRequest, request: Request) -> Response:
                 f"({queued_count}/{max_queue_size}). Please retry after the current tasks finish."
             ),
         )
+    wait_timeout = configured_wait_timeout(req)
     debug_log(
-        "request %s queued text_len=%s language=%s tone=%s queued_count=%s max_queue_size=%s",
+        "request %s queued text_len=%s language=%s tone=%s queued_count=%s max_queue_size=%s wait_timeout=%s",
         request_id,
         len(text),
         (req.language or CONFIG.get("language") or "Auto").strip() or "Auto",
         (req.tone or "").strip(),
         queued_count,
         max_queue_size,
+        wait_timeout,
     )
-    JOB_QUEUE.put(job)
-    job.done.wait()
+    if not job.done.wait(timeout=wait_timeout):
+        timeout_state = record_job_wait_timeout(job, wait_timeout)
+        if timeout_state != "completed":
+            debug_log(
+                "request %s timed out state=%s wait_timeout=%s",
+                request_id,
+                timeout_state,
+                wait_timeout,
+            )
+            if timeout_state == "queued_cancelled":
+                detail = (
+                    f"TTS job timed out after {wait_timeout:g}s while waiting in queue "
+                    "and was cancelled."
+                )
+            else:
+                detail = (
+                    f"TTS job timed out after {wait_timeout:g}s while active. "
+                    "Generation may still finish in the background; check /health."
+                )
+            raise HTTPException(status_code=504, detail=detail)
     if job.error:
         if isinstance(job.error, HTTPException):
             raise job.error

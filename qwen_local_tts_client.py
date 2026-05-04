@@ -204,6 +204,7 @@ class QwenLocalTTSClient:
             "qwen_repo_dir": self.config.get("qwen_repo_dir") or "",
             "worker_token": self.worker_token,
             "max_queue_size": _int(self.config.get("max_queue_size"), 4),
+            "request_timeout": self.request_timeout,
             "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
             "reference_audio_file": self._resolve_worker_file_path(
                 self.config.get("reference_audio_file")
@@ -303,6 +304,7 @@ class QwenLocalTTSClient:
         request = {
             "text": text,
             "language": resolved_language,
+            "wait_timeout": self._worker_wait_timeout(),
             **voice_payload,
         }
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
@@ -332,6 +334,11 @@ class QwenLocalTTSClient:
             time.monotonic() - started_at,
         )
         return output_path
+
+    def _worker_wait_timeout(self) -> float:
+        if self.request_timeout <= 2:
+            return max(1.0, self.request_timeout * 0.8)
+        return max(1.0, self.request_timeout - min(5.0, self.request_timeout * 0.1))
 
     async def sync_voice_config(
         self,
