@@ -11,6 +11,9 @@
 ### 功能
 
 - 提供 `/qwentts <文本>` 指令，可在 QQ 中直接生成语音消息。
+- 支持 `/qwentts [lang=chinese] <文本>` 临时指定合成语言。
+- 支持“用语音回答”“用中文说”“用日语说”等自然语言触发：先调用 AstrBot 当前 LLM 生成回复，再把回复转成 QQ 语音。
+- 群聊默认必须 @ 机器人后才会触发，避免误把普通群聊内容转成语音。
 - 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
 - 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
 - 提供可开关的 Debug 日志，便于排查 Docker 连通性、Worker 启动和语音生成错误。
@@ -146,11 +149,18 @@ server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
 debug_logging = false
+require_at_in_group = true
+auto_detect_language = true
+voice_reply_max_chars = 220
 ```
 
 本插件不注册 AstrBot Provider，QQ 中直接使用 `/qwentts` 指令。
 
 ### QQ 使用
+
+群聊中默认需要先 @ 机器人。
+
+直接把文本转成语音：
 
 发送：
 
@@ -159,6 +169,23 @@ debug_logging = false
 ```
 
 插件会向宿主机 Qwen Worker 请求合成，并发送 QQ 语音消息。
+
+临时指定语言：
+
+```text
+/qwentts [lang=chinese] 你好，我是茉莉。
+/qwentts [lang=japanese] おはようございます。
+```
+
+自然语言触发会先让 AstrBot 当前 LLM 回答，再把 LLM 的回答转成语音：
+
+```text
+用语音回答 介绍一下你自己
+用中文说 讲个很短的早安
+用日语说 夸我一句
+```
+
+`lang` 支持 `auto`、`chinese`、`english`、`japanese`、`korean`、`french`、`german`、`spanish`、`portuguese`、`russian`、`italian`，也支持 `中文`、`日语`、`英语` 等中文写法。
 
 注意：QQ 官方机器人接口可能不支持语音消息。推荐使用 QQ 个人号 / OneBot v11 平台，例如 NapCat 或 aiocqhttp。
 
@@ -189,6 +216,17 @@ extra_hosts:
 
 首次启动 Worker 会加载模型，首次生成也可能触发模型缓存读取或 MPS 编译。之后会复用同一个 Worker 进程。
 
+#### 生成超时：TimeoutError
+
+如果 AstrBot 提示 `Qwen Local TTS 生成超时`，通常是 Worker 仍在生成过长音频，或者 Qwen3-TTS 的 `Auto` 语言判断偶发生成了异常长的音频。
+
+建议：
+
+- 优先指定语言，例如 `/qwentts [lang=chinese] 你好`。
+- 保持 `auto_detect_language = true`，插件会在默认 `Auto` 时按文本自动改用 `Chinese`、`Japanese`、`Korean` 或 `English`。
+- 自然语言触发会受到 `voice_reply_max_chars` 限制，避免 LLM 回复太长。
+- 如果 Worker 长时间占用模型，可重启宿主机 Worker 后重试。
+
 #### 麦克风或 WebUI 和插件无关
 
 本插件不依赖 Qwen3-TTS 的 Gradio WebUI。WebUI 只用于保存音色文件；真正给 AstrBot 用的是 `qwen_worker_server.py`。
@@ -212,6 +250,9 @@ This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance ru
 ### Features
 
 - Provides `/qwentts <text>` for direct QQ voice-message generation.
+- Supports `/qwentts [lang=chinese] <text>` for per-message language override.
+- Supports natural triggers such as "用语音回答", "用中文说", and "用日语说": the plugin first asks AstrBot's current LLM, then turns the LLM reply into a QQ voice message.
+- Group chats require mentioning the bot by default, so ordinary group messages do not trigger TTS accidentally.
 - Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
 - Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
 - Provides switchable debug logs for diagnosing Docker connectivity, worker startup, and synthesis errors.
@@ -347,11 +388,18 @@ server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
 debug_logging = false
+require_at_in_group = true
+auto_detect_language = true
+voice_reply_max_chars = 220
 ```
 
 This plugin does not register an AstrBot provider. Use the `/qwentts` command directly in QQ.
 
 ### QQ Usage
+
+In group chats, mention the bot first by default.
+
+Direct text-to-speech:
 
 Send:
 
@@ -360,6 +408,23 @@ Send:
 ```
 
 The plugin sends the text to the host Qwen worker and returns a QQ voice message.
+
+Override the language for one message:
+
+```text
+/qwentts [lang=chinese] 你好，我是茉莉。
+/qwentts [lang=japanese] おはようございます。
+```
+
+Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
+
+```text
+用语音回答 介绍一下你自己
+用中文说 讲个很短的早安
+用日语说 夸我一句
+```
+
+`lang` supports `auto`, `chinese`, `english`, `japanese`, `korean`, `french`, `german`, `spanish`, `portuguese`, `russian`, and `italian`, plus Chinese aliases such as `中文`, `日语`, and `英语`.
 
 Note: QQ official bot APIs may not support voice messages. QQ personal-account / OneBot v11 platforms such as NapCat or aiocqhttp are the intended targets.
 
@@ -389,6 +454,17 @@ extra_hosts:
 #### First Generation Is Slow
 
 The first worker startup loads the model, and the first generation may trigger cache reads or MPS compilation. Later requests reuse the same worker process.
+
+#### TimeoutError During Generation
+
+If AstrBot reports `Qwen Local TTS 生成超时`, the worker is usually still generating an unusually long audio file, or Qwen3-TTS `Auto` language detection produced an overlong result.
+
+Recommended fixes:
+
+- Prefer an explicit language, for example `/qwentts [lang=chinese] 你好`.
+- Keep `auto_detect_language = true`; when the default language is `Auto`, the plugin will infer `Chinese`, `Japanese`, `Korean`, or `English` from the text.
+- Natural LLM voice replies are limited by `voice_reply_max_chars` to avoid very long speech.
+- If the worker is stuck for a long time, restart the host worker and try again.
 
 #### WebUI Microphone Is Unrelated
 

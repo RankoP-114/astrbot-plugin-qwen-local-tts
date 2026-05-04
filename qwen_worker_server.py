@@ -24,6 +24,8 @@ CONFIG: dict[str, Any] = {}
 MODEL: Qwen3TTSModel | None = None
 VOICE_PROMPT: list[VoiceClonePromptItem] | None = None
 LOCK = threading.Lock()
+ACTIVE_LOCK = threading.Lock()
+ACTIVE_REQUEST: dict[str, Any] | None = None
 LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
 
@@ -65,6 +67,35 @@ def debug_enabled() -> bool:
 def debug_log(message: str, *args: Any) -> None:
     if debug_enabled():
         LOGGER.debug("[QwenWorker] " + message, *args)
+
+
+def set_active_request(request_id: str, text_len: int, language: str, source: str) -> None:
+    global ACTIVE_REQUEST
+    with ACTIVE_LOCK:
+        ACTIVE_REQUEST = {
+            "request_id": request_id,
+            "text_len": text_len,
+            "language": language,
+            "source": source,
+            "started_at": time.monotonic(),
+        }
+
+
+def clear_active_request(request_id: str) -> None:
+    global ACTIVE_REQUEST
+    with ACTIVE_LOCK:
+        if ACTIVE_REQUEST and ACTIVE_REQUEST.get("request_id") == request_id:
+            ACTIVE_REQUEST = None
+
+
+def active_request_snapshot() -> dict[str, Any] | None:
+    with ACTIVE_LOCK:
+        if not ACTIVE_REQUEST:
+            return None
+        snapshot = dict(ACTIVE_REQUEST)
+    started_at = float(snapshot.pop("started_at", time.monotonic()))
+    snapshot["elapsed"] = round(time.monotonic() - started_at, 3)
+    return snapshot
 
 
 def tensor_or_none(value: Any) -> torch.Tensor | None:
@@ -145,6 +176,8 @@ def health() -> dict[str, Any]:
         "reference_audio_file": bool(CONFIG.get("reference_audio_file")),
         "debug_logging": debug_enabled(),
         "fingerprint": CONFIG.get("fingerprint", ""),
+        "busy": active_request_snapshot() is not None,
+        "active_request": active_request_snapshot(),
     }
 
 
@@ -170,6 +203,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
     )
 
     with LOCK:
+        set_active_request(request_id, len(text), language, source)
         try:
             if VOICE_PROMPT:
                 wavs, sr = MODEL.generate_voice_clone(
@@ -198,6 +232,8 @@ def synthesize(req: SynthesizeRequest) -> Response:
             if debug_enabled():
                 LOGGER.exception("[QwenWorker] request %s synthesize failed", request_id)
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        finally:
+            clear_active_request(request_id)
     audio = wav_bytes(wavs[0], sr)
     debug_log(
         "request %s synthesize done sr=%s wavs=%s bytes=%s elapsed=%.3fs",

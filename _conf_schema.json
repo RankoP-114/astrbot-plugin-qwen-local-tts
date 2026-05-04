@@ -23,6 +23,24 @@
     "default": false,
     "hint": "开启后会打印插件侧和 Worker 侧的健康检查、启动、合成请求、耗时和错误信息。日志只记录文本长度，不记录完整待合成文本。"
   },
+  "require_at_in_group": {
+    "description": "群聊必须 @ 机器人",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，群聊里必须 @ 机器人，/qwentts 和“用语音回答/用中文说”等自然语言触发才会生效；私聊不受影响。"
+  },
+  "auto_detect_language": {
+    "description": "自动识别合成语言",
+    "type": "bool",
+    "default": true,
+    "hint": "默认合成语言为 Auto 时，根据待朗读文本自动改用 Chinese、Japanese、Korean 或 English，减少 Auto 模式生成过长音频的概率。显式写 [lang=auto] 时不会覆盖。"
+  },
+  "voice_reply_max_chars": {
+    "description": "语音回答最大字数",
+    "type": "int",
+    "default": 220,
+    "hint": "“用语音回答/用日语说”等自然语言触发会先让 LLM 简短回答，再把回答转成语音。这里限制用于转语音的 LLM 文本长度，避免生成过长音频。"
+  },
   "python_bin": {
     "description": "Qwen3-TTS Python 路径",
     "type": "string",
@@ -90,7 +108,8 @@
     "description": "默认合成语言",
     "type": "string",
     "default": "Auto",
-    "options": ["Auto", "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish", "Portuguese", "Russian", "Italian"]
+    "options": ["Auto", "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish", "Portuguese", "Russian", "Italian"],
+    "hint": "默认值。也可以在 QQ 中临时覆盖，例如 /qwentts [lang=chinese] 你好，或发送“用日语说 早上好”。"
   },
   "host": {
     "description": "Worker 监听地址",
