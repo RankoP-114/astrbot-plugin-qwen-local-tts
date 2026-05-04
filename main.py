@@ -177,9 +177,11 @@ class QwenLocalTTSPlugin(Star):
             logger.error("Qwen Local TTS failed: %r", exc, exc_info=True)
             yield event.plain_result(self._format_tts_error(exc))
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
-    async def on_voice_reply_request(self, event: AstrMessageEvent):
-        """Turn natural voice-reply requests into an LLM request."""
+    @filter.on_llm_request(priority=1919811)
+    async def on_llm_request(self, event: AstrMessageEvent, req):
+        """Mark natural voice-reply requests in AstrBot's normal LLM path."""
+        if event.get_extra("qwen_local_tts_voice_reply", False):
+            return
         if self._requires_at_but_missing(event):
             return
 
@@ -196,21 +198,22 @@ class QwenLocalTTSPlugin(Star):
         if not prompt:
             return
 
-        event.stop_event()
-        event.should_call_llm(True)
         event.set_extra("qwen_local_tts_voice_reply", True)
         event.set_extra("qwen_local_tts_language", language)
         event.set_extra("qwen_local_tts_source_prompt_len", len(prompt))
 
         self._debug(
-            "voice reply request matched prompt_len=%s language=%s",
+            "voice reply LLM request matched prompt_len=%s language=%s",
             len(prompt),
             language,
         )
-        yield event.request_llm(
-            prompt=self._build_voice_reply_prompt(prompt, language),
-            system_prompt=self._build_voice_reply_system_prompt(language),
-        )
+        if req is not None:
+            req.prompt = self._build_voice_reply_prompt(prompt, language)
+            voice_system_prompt = self._build_voice_reply_system_prompt(language)
+            req.system_prompt = (
+                ((getattr(req, "system_prompt", "") or "").rstrip() + "\n\n" + voice_system_prompt)
+                .strip()
+            )
 
     @filter.on_decorating_result(priority=90000)
     async def on_decorating_result(self, event: AstrMessageEvent):
