@@ -1,49 +1,188 @@
 # astrbot-plugin-qwen-local-tts
 
-Local Qwen3-TTS support for AstrBot.
+本插件让 AstrBot 使用本机运行的 Qwen3-TTS 生成 QQ 语音消息。
 
-This plugin provides two entry points:
+This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance running on the host machine.
 
-- A `qwen_local_tts` AstrBot TTS provider for AstrBot's normal TTS pipeline.
-- A `/qwentts <text>` command that sends a QQ voice message using the voice file configured in the plugin settings.
+## 功能 / Features
 
-## What voice file means
+- 注册 `qwen_local_tts` TTS Provider，可接入 AstrBot 的标准 TTS 流程。
+- 提供 `/qwentts <文本>` 指令，可在 QQ 中直接测试语音生成。
+- 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
+- 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
 
-Use the `voice_clone_prompt_*.pt` file produced by the Qwen3-TTS WebUI:
+- Registers a `qwen_local_tts` TTS provider for AstrBot's normal TTS pipeline.
+- Provides `/qwentts <text>` for direct QQ voice-message testing.
+- Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
+- Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
+
+## 架构 / Architecture
+
+```text
+QQ / OneBot
+    |
+ AstrBot in Docker
+    |
+ http://host.docker.internal:8514
+    |
+ Qwen Worker on host
+    |
+ Qwen3-TTS model + voice file
+```
+
+在这种模式下，Docker 容器里不需要安装 Qwen3-TTS、PyTorch 或模型文件。容器只安装本插件和 `aiohttp`，把文本发送到宿主机 Worker，Worker 返回 WAV 音频。
+
+In this mode, the Docker container does not need Qwen3-TTS, PyTorch, or model files. It only installs this plugin and `aiohttp`, sends text to the host worker, and receives WAV audio back.
+
+## 音色文件 / Voice File
+
+推荐使用 Qwen3-TTS WebUI 保存出的 `.pt` 音色文件：
+
+1. 打开 Qwen3-TTS Base WebUI。
+2. 进入 `Save / Load Voice`。
+3. 上传参考音频，并填写对应的准确文本。
+4. 点击 `Save Voice File`。
+5. 将保存出的 `voice_clone_prompt_*.pt` 路径填入宿主机 Worker 配置里的 `voice_file`。
+
+It is recommended to use the `.pt` voice file saved by the Qwen3-TTS WebUI:
 
 1. Open the Qwen3-TTS Base WebUI.
 2. Go to `Save / Load Voice`.
-3. Upload a reference audio file and fill in the exact transcript.
+3. Upload the reference audio and fill in the exact transcript.
 4. Click `Save Voice File`.
-5. Upload that `.pt` file in this plugin's backend setting `voice_file`.
+5. Put the saved `voice_clone_prompt_*.pt` path into `voice_file` in the host worker config.
 
-You can also configure `reference_audio_file` and `reference_text` as a fallback, but the saved `.pt` voice file is faster because the voice prompt is precomputed.
+也可以直接配置 `reference_audio_file` 和 `reference_text` 作为备用方案，但每次生成时都需要处理参考音频，速度通常不如 `.pt` 音色文件。
 
-## Local worker
+You can also configure `reference_audio_file` and `reference_text` as a fallback, but that requires processing the reference audio during generation and is usually slower than using the `.pt` voice file.
 
-The plugin can start `qwen_worker_server.py` with a configured Qwen3-TTS Python environment, but the recommended Docker setup is to run the worker on the host and let AstrBot call it over HTTP.
+## 部署：AstrBot 在 Docker，Qwen 在本机 / Deployment: AstrBot in Docker, Qwen on Host
 
-- Python: set `QWEN_TTS_PYTHON` or configure `python_bin`.
-- Qwen repo: set `QWEN_TTS_REPO` or configure `qwen_repo_dir`.
-- Worker URL from Docker: `http://host.docker.internal:8514`
+### 1. 在宿主机准备 Qwen3-TTS / Prepare Qwen3-TTS on the Host
 
-The model is loaded once in the worker process and reused for later requests.
+先确保宿主机上已经能运行 Qwen3-TTS，并且能用 Qwen3-TTS 的 Python 环境导入 `qwen_tts`。
 
-## AstrBot in Docker, Qwen on macOS host
+Make sure Qwen3-TTS already works on the host and its Python environment can import `qwen_tts`.
 
-Yes. Keep Qwen3-TTS on the macOS host and let AstrBot Docker call it over HTTP.
+```bash
+<path-to-qwen-venv-python> -c "from qwen_tts import Qwen3TTSModel; print('ok')"
+```
 
-1. Copy `host_worker_config.example.json` to your own config file and set `voice_file` to the host path of the saved Qwen `.pt` voice file.
-2. Start the worker on macOS:
+macOS Apple Silicon 通常建议使用：
+
+For Apple Silicon macOS, the usual settings are:
+
+```text
+device = mps
+attn_implementation = sdpa
+PYTORCH_ENABLE_MPS_FALLBACK = 1
+```
+
+### 2. 创建宿主机 Worker 配置 / Create the Host Worker Config
+
+复制示例配置：
+
+Copy the example config:
+
+```bash
+cd <plugin-dir>
+cp host_worker_config.example.json host_worker_config.local.json
+```
+
+编辑 `host_worker_config.local.json`：
+
+Edit `host_worker_config.local.json`:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8514,
+  "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
+  "device": "mps",
+  "dtype": "bfloat16",
+  "attn_implementation": "sdpa"
+}
+```
+
+说明：
+
+Notes:
+
+- `host` 要保持 `0.0.0.0`，这样 Docker 容器才能访问宿主机 Worker。
+- `voice_file` 是宿主机上的文件路径，不是 Docker 容器里的路径。
+- `hf_home` 可以留空，也可以设置为宿主机上的 Hugging Face 缓存目录。
+- `fingerprint` 可保持示例值；Docker 模式下插件配置会信任外部 Worker。
+
+- Keep `host` as `0.0.0.0` so the Docker container can reach the host worker.
+- `voice_file` is a host filesystem path, not a path inside the Docker container.
+- `hf_home` can be empty, or point to a Hugging Face cache directory on the host.
+- `fingerprint` can keep the example value; Docker mode trusts the external worker config.
+
+### 3. 启动宿主机 Worker / Start the Host Worker
+
+在宿主机运行：
+
+Run this on the host:
 
 ```bash
 cd <plugin-dir>
 export QWEN_TTS_PYTHON="<path-to-qwen-venv-python>"
 export QWEN_TTS_REPO="<path-to-qwen3-tts-repo>"
-./start_host_worker.sh ./host_worker_config.example.json
+./start_host_worker.sh ./host_worker_config.local.json
 ```
 
-3. In AstrBot Docker plugin/provider settings:
+启动后检查：
+
+Check after startup:
+
+```bash
+curl http://127.0.0.1:8514/health
+```
+
+如果 AstrBot Docker 运行在 macOS 或 Windows Docker Desktop 中，容器内访问宿主机通常使用：
+
+If AstrBot Docker runs on Docker Desktop for macOS or Windows, the container usually reaches the host through:
+
+```text
+http://host.docker.internal:8514
+```
+
+如果是 Linux Docker，可能需要在 `docker-compose.yml` 中加入：
+
+For Linux Docker, you may need this in `docker-compose.yml`:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+### 4. 安装插件到 AstrBot / Install the Plugin into AstrBot
+
+将本插件放到 AstrBot 插件目录：
+
+Place this plugin under AstrBot's plugin directory:
+
+```text
+AstrBot/data/plugins/astrbot-plugin-qwen-local-tts
+```
+
+在 AstrBot 容器内安装依赖：
+
+Install dependencies inside the AstrBot container:
+
+```bash
+pip install -r data/plugins/astrbot-plugin-qwen-local-tts/requirements.txt
+```
+
+然后重启 AstrBot。
+
+Then restart AstrBot.
+
+### 5. 配置 AstrBot 后台 / Configure AstrBot
+
+插件配置或 Provider 配置中填写：
+
+Set these values in the plugin config or provider config:
 
 ```text
 server_url = http://host.docker.internal:8514
@@ -51,22 +190,76 @@ auto_start_server = false
 allow_external_server_config = true
 ```
 
-In this mode Docker does not install or load Qwen3-TTS. It only sends text to the macOS host worker and receives a WAV file back.
+如果要接入 AstrBot 的自动 TTS 流程，添加或启用 Provider：
 
-## Use in QQ
+To use AstrBot's automatic TTS pipeline, add or enable this provider:
 
-For a quick QQ test, send:
+```text
+type = qwen_local_tts
+id = qwen_local_tts
+```
+
+如果只想在 QQ 中手动测试，可以直接使用 `/qwentts` 指令。
+
+If you only want to test manually in QQ, use the `/qwentts` command directly.
+
+## QQ 使用 / QQ Usage
+
+发送：
+
+Send:
 
 ```text
 /qwentts 你好，这是本地 Qwen3-TTS 生成的语音。
 ```
 
-For automatic AstrBot reply-to-voice output:
+插件会向宿主机 Qwen Worker 请求合成，并发送 QQ 语音消息。
 
-1. Install this plugin under `AstrBot/data/plugins/astrbot-plugin-qwen-local-tts`.
-2. Install plugin dependencies from `requirements.txt`.
-3. Add a TTS provider of type `qwen_local_tts`.
-4. Set `voice_file` to the saved Qwen `.pt` voice file path.
-5. Enable AstrBot TTS and select provider id `qwen_local_tts`.
+The plugin sends the text to the host Qwen worker and returns a QQ voice message.
 
-QQ official bot interfaces may not support voice records. QQ personal account / OneBot v11 (`aiocqhttp`, for example NapCat) is the intended target.
+注意：QQ 官方机器人接口可能不支持语音消息。推荐使用 QQ 个人号 / OneBot v11 平台，例如 NapCat 或 aiocqhttp。
+
+Note: QQ official bot APIs may not support voice messages. QQ personal-account / OneBot v11 platforms such as NapCat or aiocqhttp are the intended targets.
+
+## 常见问题 / Troubleshooting
+
+### Docker 里访问不到 Worker / Docker Cannot Reach the Worker
+
+确认宿主机 Worker 监听的是 `0.0.0.0:8514`，不是 `127.0.0.1:8514`。
+
+Make sure the host worker binds to `0.0.0.0:8514`, not `127.0.0.1:8514`.
+
+在 AstrBot 容器里测试：
+
+Test inside the AstrBot container:
+
+```bash
+curl http://host.docker.internal:8514/health
+```
+
+Linux Docker 如果无法解析 `host.docker.internal`，给 compose 加上：
+
+If Linux Docker cannot resolve `host.docker.internal`, add this to compose:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+### 生成失败：找不到音色文件 / Voice File Not Found
+
+`voice_file` 必须写在宿主机 Worker 配置中，并且路径必须是宿主机真实存在的绝对路径。不要把宿主机音色路径填到 Docker 容器内的插件配置里。
+
+`voice_file` must be set in the host worker config, and it must be a real absolute path on the host. Do not put the host voice path into the plugin config inside Docker.
+
+### 首次生成很慢 / First Generation Is Slow
+
+首次启动 Worker 会加载模型，首次生成也可能触发模型缓存读取或 MPS 编译。之后会复用同一个 Worker 进程。
+
+The first worker startup loads the model, and the first generation may trigger cache reads or MPS compilation. Later requests reuse the same worker process.
+
+### 麦克风或 WebUI 和插件无关 / WebUI Microphone Is Unrelated
+
+本插件不依赖 Qwen3-TTS 的 Gradio WebUI。WebUI 只用于保存音色文件；真正给 AstrBot 用的是 `qwen_worker_server.py`。
+
+This plugin does not depend on the Qwen3-TTS Gradio WebUI. The WebUI is only used to save the voice file; AstrBot talks to `qwen_worker_server.py`.
