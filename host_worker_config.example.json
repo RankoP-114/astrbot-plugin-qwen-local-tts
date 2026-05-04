@@ -11,6 +11,7 @@
   "qwen_repo_dir": "",
   "worker_token": "",
   "debug_logging": false,
+  "max_queue_size": 4,
   "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
   "reference_audio_file": "",
   "reference_text": "",

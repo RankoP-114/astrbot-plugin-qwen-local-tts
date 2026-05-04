@@ -221,6 +221,12 @@
     "type": "float",
     "default": 180.0
   },
+  "max_queue_size": {
+    "description": "Worker 最大排队任务数",
+    "type": "int",
+    "default": 4,
+    "hint": "Worker 单线程 FIFO 处理 TTS。这里限制等待队列长度，超过后返回 429，避免群聊连续触发导致任务无限堆积。至少为 1。"
+  },
   "startup_timeout": {
     "description": "Worker 启动超时秒数",
     "type": "float",

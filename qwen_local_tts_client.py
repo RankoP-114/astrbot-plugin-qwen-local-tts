@@ -101,6 +101,10 @@ def _bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+class WorkerAuthError(RuntimeError):
+    """Raised when the configured worker token does not match the worker."""
+
+
 class QwenLocalTTSClient:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = dict(config or {})
@@ -199,6 +203,7 @@ class QwenLocalTTSClient:
             "hf_endpoint": self.config.get("hf_endpoint") or "",
             "qwen_repo_dir": self.config.get("qwen_repo_dir") or "",
             "worker_token": self.worker_token,
+            "max_queue_size": _int(self.config.get("max_queue_size"), 4),
             "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
             "reference_audio_file": self._resolve_worker_file_path(
                 self.config.get("reference_audio_file")
@@ -256,6 +261,18 @@ class QwenLocalTTSClient:
             "x_vector_only_mode": _bool(self.config.get("x_vector_only_mode"), False),
         }
 
+    def _build_synthesize_payload(
+        self,
+        language: str | None = None,
+        tone: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.sync_voice_to_external_worker:
+            return {
+                "tone": tone or "",
+                "voice_key": "worker_config",
+            }
+        return self._build_voice_config_payload(language, tone)
+
     async def synthesize(
         self,
         text: str,
@@ -268,7 +285,7 @@ class QwenLocalTTSClient:
         request_id = uuid.uuid4().hex[:8]
         started_at = time.monotonic()
         resolved_language = language or self.config_payload.get("language") or "Auto"
-        voice_payload = self._build_voice_config_payload(resolved_language, tone)
+        voice_payload = self._build_synthesize_payload(resolved_language, tone)
         self._debug(
             "request %s synthesize start text_len=%s language=%s tone=%s voice_key=%s",
             request_id,
@@ -444,9 +461,21 @@ class QwenLocalTTSClient:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(f"{self.server_url}/health", headers=self._headers()) as resp:
                     if resp.status != 200:
-                        self._debug("worker health returned status=%s", resp.status)
+                        detail = await resp.text()
+                        self._debug(
+                            "worker health returned status=%s detail=%s",
+                            resp.status,
+                            detail,
+                        )
+                        if resp.status in (401, 403):
+                            raise WorkerAuthError(
+                                "Qwen local TTS worker authentication failed "
+                                f"({resp.status}). Check worker_token in AstrBot and host worker config."
+                            )
                         return None
                     return await resp.json()
+        except WorkerAuthError:
+            raise
         except Exception as exc:
             self._debug("worker health request failed: %s: %s", type(exc).__name__, exc)
             return None

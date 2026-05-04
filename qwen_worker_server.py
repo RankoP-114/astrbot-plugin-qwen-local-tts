@@ -31,6 +31,8 @@ ACTIVE_LOCK = threading.Lock()
 ACTIVE_REQUEST: dict[str, Any] | None = None
 QUEUE_LOCK = threading.Lock()
 QUEUED_REQUESTS: dict[str, dict[str, Any]] = {}
+REJECTED_REQUESTS = 0
+LAST_REJECTED_REQUEST: dict[str, Any] | None = None
 SYNTHESIS_THREAD: threading.Thread | None = None
 LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
@@ -90,6 +92,17 @@ def bool_from_config(value: Any, default: bool = False) -> bool:
         if normalized in ("0", "false", "no", "n", "off", "disable", "disabled"):
             return False
     return bool(value)
+
+
+def int_from_config(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def configured_max_queue_size() -> int:
+    return max(1, int_from_config(CONFIG.get("max_queue_size"), 4))
 
 
 def debug_enabled() -> bool:
@@ -159,9 +172,25 @@ def queue_request_snapshot(job: SynthesisJob) -> dict[str, Any]:
     }
 
 
-def add_queued_request(job: SynthesisJob) -> None:
+def record_queue_rejection(job: SynthesisJob, queued_count: int, max_queue_size: int) -> None:
+    global REJECTED_REQUESTS, LAST_REJECTED_REQUEST
     with QUEUE_LOCK:
+        REJECTED_REQUESTS += 1
+        snapshot = queue_request_snapshot(job)
+        snapshot["queued_count"] = queued_count
+        snapshot["max_queue_size"] = max_queue_size
+        snapshot["rejected_at"] = time.monotonic()
+        LAST_REJECTED_REQUEST = snapshot
+
+
+def try_add_queued_request(job: SynthesisJob) -> tuple[bool, int, int]:
+    max_queue_size = configured_max_queue_size()
+    with QUEUE_LOCK:
+        queued_count = len(QUEUED_REQUESTS)
+        if queued_count >= max_queue_size:
+            return False, queued_count, max_queue_size
         QUEUED_REQUESTS[job.request_id] = queue_request_snapshot(job)
+        return True, queued_count + 1, max_queue_size
 
 
 def remove_queued_request(request_id: str) -> None:
@@ -177,6 +206,20 @@ def queued_requests_snapshot() -> list[dict[str, Any]]:
         created_at = float(item.pop("created_at", now))
         item["queued_for"] = round(now - created_at, 3)
     return snapshots
+
+
+def queue_rejection_snapshot() -> dict[str, Any]:
+    now = time.monotonic()
+    with QUEUE_LOCK:
+        rejected_count = REJECTED_REQUESTS
+        last_rejected = dict(LAST_REJECTED_REQUEST or {})
+    if last_rejected:
+        rejected_at = float(last_rejected.pop("rejected_at", now))
+        last_rejected["rejected_for"] = round(now - rejected_at, 3)
+    return {
+        "rejected_requests": rejected_count,
+        "last_rejected_request": last_rejected or None,
+    }
 
 
 def voice_config_snapshot() -> dict[str, Any]:
@@ -425,8 +468,10 @@ def health(request: Request) -> dict[str, Any]:
         "fingerprint": CONFIG.get("fingerprint", ""),
         "busy": active_request is not None,
         "active_request": active_request,
+        "max_queue_size": configured_max_queue_size(),
         "queued_count": len(queued_requests),
         "queued_requests": queued_requests,
+        **queue_rejection_snapshot(),
         **voice_config_snapshot(),
     }
 
@@ -482,14 +527,31 @@ def synthesize(req: SynthesizeRequest, request: Request) -> Response:
 
     request_id = uuid.uuid4().hex[:8]
     job = SynthesisJob(request_id=request_id, request=req, created_at=time.monotonic())
-    add_queued_request(job)
+    accepted, queued_count, max_queue_size = try_add_queued_request(job)
+    if not accepted:
+        record_queue_rejection(job, queued_count, max_queue_size)
+        debug_log(
+            "request %s rejected queue_full text_len=%s queued_count=%s max_queue_size=%s",
+            request_id,
+            len(text),
+            queued_count,
+            max_queue_size,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "TTS queue is full "
+                f"({queued_count}/{max_queue_size}). Please retry after the current tasks finish."
+            ),
+        )
     debug_log(
-        "request %s queued text_len=%s language=%s tone=%s queued_count=%s",
+        "request %s queued text_len=%s language=%s tone=%s queued_count=%s max_queue_size=%s",
         request_id,
         len(text),
         (req.language or CONFIG.get("language") or "Auto").strip() or "Auto",
         (req.tone or "").strip(),
-        len(queued_requests_snapshot()),
+        queued_count,
+        max_queue_size,
     )
     JOB_QUEUE.put(job)
     job.done.wait()

@@ -99,6 +99,7 @@ cp host_worker_config.example.json host_worker_config.local.json
   "port": 8514,
   "voice_file": "",
   "worker_token": "",
+  "max_queue_size": 4,
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -111,6 +112,7 @@ cp host_worker_config.example.json host_worker_config.local.json
 - `host` 要保持 `0.0.0.0`，这样 Docker 容器才能访问宿主机 Worker。
 - `voice_file` 可以留空；插件会在每个 `/synthesize` 请求里携带 AstrBot 后台当前音色，Worker 会按任务原子加载并生成。
 - `worker_token` 可留空；如果填写，AstrBot 插件后台的 `worker_token` 必须一致。
+- `max_queue_size` 限制等待队列长度，队列满时 Worker 会返回 429，避免请求无限堆积。
 - `hf_home` 可以留空，也可以设置为宿主机上的 Hugging Face 缓存目录。
 - `fingerprint` 可保持示例值；Docker 模式下插件配置会信任外部 Worker。
 
@@ -172,6 +174,7 @@ allow_external_server_config = true
 sync_voice_to_external_worker = true
 host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts
 debug_logging = false
+max_queue_size = 4
 require_at_in_group = true
 auto_detect_language = true
 default_tone = None
@@ -179,6 +182,8 @@ voice_reply_max_chars = 220
 ```
 
 其中 `host_plugin_data_dir` 要填写宿主机上的真实目录，不是 Docker 容器里的路径。这个目录下面应能看到 `files/voice_file/voice_clone_prompt_*.pt`。
+
+如果把 `sync_voice_to_external_worker` 关掉，插件不会再把 AstrBot 后台音色路径随请求发给 Worker，此时会使用宿主机 Worker 配置里的 `voice_file` 或 `reference_audio_file`。
 
 本插件不注册 AstrBot Provider，QQ 中直接使用 `/qwentts` 指令。
 
@@ -282,7 +287,7 @@ extra_hosts:
 - 优先指定语言，例如 `/qwentts [lang=chinese] 你好`。
 - 保持 `auto_detect_language = true`，插件会在默认 `Auto` 时按文本自动改用 `Chinese`、`Japanese`、`Korean` 或 `English`。
 - 自然语言触发会受到 `voice_reply_max_chars` 限制，避免 LLM 回复太长。
-- Worker 是 FIFO 队列；如果前面还有长任务，当前请求会排队等待。可通过 `/health` 查看 `active_request`、`queued_count` 和 `queued_requests`。
+- Worker 是 FIFO 队列；如果前面还有长任务，当前请求会排队等待。队列超过 `max_queue_size` 时会返回 429。可通过 `/health` 查看 `active_request`、`queued_count`、`queued_requests` 和拒绝统计。
 - 如果 Worker 长时间占用模型，可重启宿主机 Worker 后重试。
 
 #### 麦克风或 WebUI 和插件无关
@@ -396,6 +401,7 @@ Edit `host_worker_config.local.json` and at least check these fields:
   "port": 8514,
   "voice_file": "",
   "worker_token": "",
+  "max_queue_size": 4,
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -408,6 +414,7 @@ Notes:
 - Keep `host` as `0.0.0.0` so the Docker container can reach the host worker.
 - `voice_file` can be empty; every `/synthesize` request carries the voice currently selected in AstrBot settings, and the worker loads that voice for the queued task before generation.
 - `worker_token` can be empty; if you set it, the AstrBot plugin config must use the same `worker_token`.
+- `max_queue_size` limits the waiting queue. When the queue is full, the worker returns 429 instead of accumulating requests forever.
 - `hf_home` can be empty, or point to a Hugging Face cache directory on the host.
 - `fingerprint` can keep the example value; Docker mode trusts the external worker config.
 
@@ -469,6 +476,7 @@ allow_external_server_config = true
 sync_voice_to_external_worker = true
 host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts
 debug_logging = false
+max_queue_size = 4
 require_at_in_group = true
 auto_detect_language = true
 default_tone = None
@@ -476,6 +484,8 @@ voice_reply_max_chars = 220
 ```
 
 `host_plugin_data_dir` must be the real directory on the host, not a path inside the Docker container. It should contain `files/voice_file/voice_clone_prompt_*.pt`.
+
+If `sync_voice_to_external_worker` is disabled, the plugin stops sending AstrBot-side voice paths with synthesis requests. In that mode, the host worker uses its own `voice_file` or `reference_audio_file` from `host_worker_config.local.json`.
 
 This plugin does not register an AstrBot provider. Use the `/qwentts` command directly in QQ.
 
@@ -579,7 +589,7 @@ Recommended fixes:
 - Prefer an explicit language, for example `/qwentts [lang=chinese] 你好`.
 - Keep `auto_detect_language = true`; when the default language is `Auto`, the plugin will infer `Chinese`, `Japanese`, `Korean`, or `English` from the text.
 - Natural LLM voice replies are limited by `voice_reply_max_chars` to avoid very long speech.
-- The worker is FIFO queued; if a long request is already active, the current request waits in line. Check `/health` for `active_request`, `queued_count`, and `queued_requests`.
+- The worker is FIFO queued; if a long request is already active, the current request waits in line. When the queue exceeds `max_queue_size`, the worker returns 429. Check `/health` for `active_request`, `queued_count`, `queued_requests`, and rejection counters.
 - If the worker is stuck for a long time, restart the host worker and try again.
 
 #### WebUI Microphone Is Unrelated
