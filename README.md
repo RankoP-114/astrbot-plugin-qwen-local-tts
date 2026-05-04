@@ -153,6 +153,7 @@ debug_logging = false
 
 ```text
 type = qwen_local_tts
+provider_type = text_to_speech
 id = qwen_local_tts
 ```
 
@@ -362,6 +363,7 @@ To use AstrBot's automatic TTS pipeline, add or enable this provider:
 
 ```text
 type = qwen_local_tts
+provider_type = text_to_speech
 id = qwen_local_tts
 ```
 

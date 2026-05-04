@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 from astrbot.core.provider.entities import ProviderType
 from astrbot.core.provider.provider import TTSProvider
-from astrbot.core.provider.register import register_provider_adapter
+from astrbot.core.provider import register as provider_register_module
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
@@ -22,6 +22,7 @@ from qwen_local_tts_client import QwenLocalTTSClient
 DEFAULT_PROVIDER_CONFIG = {
     "id": "qwen_local_tts",
     "type": "qwen_local_tts",
+    "provider_type": "text_to_speech",
     "enable": False,
     "server_url": "http://host.docker.internal:8514",
     "auto_start_server": False,
@@ -52,7 +53,38 @@ DEFAULT_PROVIDER_CONFIG = {
 }
 
 
-@register_provider_adapter(
+def _register_provider_adapter_idempotent(
+    provider_type_name: str,
+    desc: str,
+    provider_type: ProviderType,
+    default_config_tmpl: dict[str, Any],
+    provider_display_name: str,
+):
+    """AstrBot does not always unregister provider adapters during plugin hot reload."""
+    provider_cls_map = getattr(provider_register_module, "provider_cls_map", None)
+    provider_registry = getattr(provider_register_module, "provider_registry", None)
+    if isinstance(provider_cls_map, dict) and provider_type_name in provider_cls_map:
+        provider_cls_map.pop(provider_type_name, None)
+        if isinstance(provider_registry, list):
+            provider_registry[:] = [
+                meta
+                for meta in provider_registry
+                if getattr(meta, "type", None) != provider_type_name
+            ]
+        logger.debug(
+            "Removed stale provider adapter before re-registering: %s",
+            provider_type_name,
+        )
+    return provider_register_module.register_provider_adapter(
+        provider_type_name,
+        desc,
+        provider_type=provider_type,
+        default_config_tmpl=default_config_tmpl,
+        provider_display_name=provider_display_name,
+    )
+
+
+@_register_provider_adapter_idempotent(
     "qwen_local_tts",
     "Local Qwen3-TTS voice-file provider",
     provider_type=ProviderType.TEXT_TO_SPEECH,
