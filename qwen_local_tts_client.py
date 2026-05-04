@@ -33,6 +33,15 @@ VOICE_FILE_BY_LANGUAGE = {
     "Japanese": "voice_file_japanese",
     "English": "voice_file_english",
 }
+VOICE_FILE_BY_TONE = {
+    "happy": "voice_file_tone_happy",
+    "sad": "voice_file_tone_sad",
+    "angry": "voice_file_tone_angry",
+    "gentle": "voice_file_tone_gentle",
+    "calm": "voice_file_tone_calm",
+    "excited": "voice_file_tone_excited",
+    "shy": "voice_file_tone_shy",
+}
 
 
 def first_file_path(value: Any) -> str:
@@ -105,6 +114,7 @@ class QwenLocalTTSClient:
         )
         self.host_plugin_data_dir = str(self.config.get("host_plugin_data_dir") or "").strip()
         self.debug_logging = _bool(self.config.get("debug_logging"), False)
+        self.worker_token = str(self.config.get("worker_token") or "").strip()
         self.request_timeout = _float(self.config.get("request_timeout"), 180.0)
         self.startup_timeout = _float(self.config.get("startup_timeout"), 240.0)
         self.process: asyncio.subprocess.Process | None = None
@@ -136,6 +146,7 @@ class QwenLocalTTSClient:
         )
         self.host_plugin_data_dir = str(self.config.get("host_plugin_data_dir") or "").strip()
         self.debug_logging = _bool(self.config.get("debug_logging"), False)
+        self.worker_token = str(self.config.get("worker_token") or "").strip()
         self.request_timeout = _float(self.config.get("request_timeout"), 180.0)
         self.startup_timeout = _float(self.config.get("startup_timeout"), 240.0)
         self.config_payload = self._build_worker_config()
@@ -160,7 +171,14 @@ class QwenLocalTTSClient:
             return os.path.abspath(os.path.join(base, expanded))
         return expanded
 
-    def _voice_file_for_language(self, language: str | None) -> tuple[str, str]:
+    def _voice_file_for_language(self, language: str | None, tone: str | None = None) -> tuple[str, str]:
+        tone_key = (tone or "").strip()
+        tone_config_key = VOICE_FILE_BY_TONE.get(tone_key)
+        if tone_config_key:
+            voice_file = first_file_path(self.config.get(tone_config_key))
+            if voice_file:
+                return tone_config_key, voice_file
+
         language_key = (language or "").strip()
         config_key = VOICE_FILE_BY_LANGUAGE.get(language_key, "voice_file")
         voice_file = first_file_path(self.config.get(config_key))
@@ -180,6 +198,7 @@ class QwenLocalTTSClient:
             "hf_home": self.config.get("hf_home") or "",
             "hf_endpoint": self.config.get("hf_endpoint") or "",
             "qwen_repo_dir": self.config.get("qwen_repo_dir") or "",
+            "worker_token": self.worker_token,
             "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
             "reference_audio_file": self._resolve_worker_file_path(
                 self.config.get("reference_audio_file")
@@ -215,11 +234,21 @@ class QwenLocalTTSClient:
         if self.debug_logging:
             astrbot_logger.debug("[QwenLocalTTS] " + message, *args)
 
-    def _build_voice_config_payload(self, language: str | None = None) -> dict[str, Any]:
-        voice_key, voice_file = self._voice_file_for_language(language)
+    def _headers(self) -> dict[str, str]:
+        if not self.worker_token:
+            return {}
+        return {"X-Qwen-Worker-Token": self.worker_token}
+
+    def _build_voice_config_payload(
+        self,
+        language: str | None = None,
+        tone: str | None = None,
+    ) -> dict[str, Any]:
+        voice_key, voice_file = self._voice_file_for_language(language, tone)
         return {
             "voice_file": self._resolve_worker_file_path(voice_file),
             "voice_key": voice_key,
+            "tone": tone or "",
             "reference_audio_file": self._resolve_worker_file_path(
                 self.config.get("reference_audio_file")
             ),
@@ -227,21 +256,28 @@ class QwenLocalTTSClient:
             "x_vector_only_mode": _bool(self.config.get("x_vector_only_mode"), False),
         }
 
-    async def synthesize(self, text: str, language: str | None = None) -> str:
+    async def synthesize(
+        self,
+        text: str,
+        language: str | None = None,
+        tone: str | None = None,
+    ) -> str:
         text = (text or "").strip()
         if not text:
             raise ValueError("TTS text is empty.")
         request_id = uuid.uuid4().hex[:8]
         started_at = time.monotonic()
         resolved_language = language or self.config_payload.get("language") or "Auto"
+        voice_payload = self._build_voice_config_payload(resolved_language, tone)
         self._debug(
-            "request %s synthesize start text_len=%s language=%s",
+            "request %s synthesize start text_len=%s language=%s tone=%s voice_key=%s",
             request_id,
             len(text),
             resolved_language,
+            tone or "",
+            voice_payload.get("voice_key"),
         )
         await self.ensure_server()
-        await self.sync_voice_config(resolved_language)
 
         output_path = os.path.join(
             get_astrbot_temp_path(),
@@ -250,10 +286,15 @@ class QwenLocalTTSClient:
         request = {
             "text": text,
             "language": resolved_language,
+            **voice_payload,
         }
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{self.server_url}/synthesize", json=request) as resp:
+            async with session.post(
+                f"{self.server_url}/synthesize",
+                json=request,
+                headers=self._headers(),
+            ) as resp:
                 data = await resp.read()
                 if resp.status != 200:
                     detail = data.decode("utf-8", errors="replace")
@@ -275,12 +316,17 @@ class QwenLocalTTSClient:
         )
         return output_path
 
-    async def sync_voice_config(self, language: str | None = None) -> None:
+    async def sync_voice_config(
+        self,
+        language: str | None = None,
+        tone: str | None = None,
+    ) -> None:
         if not self.sync_voice_to_external_worker or self._voice_config_endpoint_missing:
             return
-        payload = self._build_voice_config_payload(language)
+        payload = self._build_voice_config_payload(language, tone)
         worker_payload = dict(payload)
         voice_key = str(worker_payload.pop("voice_key", "voice_file"))
+        worker_payload.pop("tone", None)
         raw_payload = json.dumps(worker_payload, sort_keys=True, ensure_ascii=True, default=str)
         if raw_payload == self._last_synced_voice_payload and self._health_matches_voice_payload(worker_payload):
             return
@@ -298,7 +344,11 @@ class QwenLocalTTSClient:
         )
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{self.server_url}/voice_config", json=worker_payload) as resp:
+            async with session.post(
+                f"{self.server_url}/voice_config",
+                json=worker_payload,
+                headers=self._headers(),
+            ) as resp:
                 data = await resp.read()
                 if resp.status == 404:
                     self._debug("worker does not support /voice_config; voice sync skipped")
@@ -392,7 +442,7 @@ class QwenLocalTTSClient:
         timeout = aiohttp.ClientTimeout(total=3)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{self.server_url}/health") as resp:
+                async with session.get(f"{self.server_url}/health", headers=self._headers()) as resp:
                     if resp.status != 200:
                         self._debug("worker health returned status=%s", resp.status)
                         return None

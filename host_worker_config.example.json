@@ -9,6 +9,7 @@
   "hf_home": "",
   "hf_endpoint": "https://hf-mirror.com",
   "qwen_repo_dir": "",
+  "worker_token": "",
   "debug_logging": false,
   "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
   "reference_audio_file": "",

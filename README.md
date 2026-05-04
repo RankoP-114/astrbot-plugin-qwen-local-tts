@@ -12,11 +12,15 @@
 
 - 提供 `/qwentts <文本>` 指令，可在 QQ 中直接生成语音消息。
 - 支持 `/qwentts [lang=chinese] <文本>` 临时指定合成语言。
+- 支持 `/qwentts [tone=happy] <文本>`、`用开心语气说` 等语气触发。
 - 支持“用语音回答”“用中文说”“用日语说”等自然语言触发：先调用 AstrBot 当前 LLM 生成回复，再把回复转成 QQ 语音。
 - 群聊默认必须 @ 机器人后才会触发，避免误把普通群聊内容转成语音。
 - 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
-- 支持 AstrBot 后台更换音色后自动热同步到宿主机 Worker，无需每次重启 Worker。
+- 支持 AstrBot 后台更换音色后随合成请求传递给宿主机 Worker，无需每次重启 Worker。
 - 支持为中文、日语、英语分别配置不同 `.pt` 音色文件。
+- 支持为开心、悲伤、生气、温柔、平静、兴奋、害羞分别配置不同 `.pt` 语气音色文件。
+- Worker 内置单线程 FIFO 队列，避免并发请求互相抢音色。
+- 可选 Worker 访问令牌，适合把 Worker 暴露给 Docker 访问时做一层轻量鉴权。
 - 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
 - 提供可开关的 Debug 日志，便于排查 Docker 连通性、Worker 启动和语音生成错误。
 
@@ -56,8 +60,9 @@ QQ / OneBot
 - `中文专用音色文件`：语言为 `Chinese` 或“用中文说”时优先使用。
 - `日语专用音色文件`：语言为 `Japanese` 或“用日语说/用日文说”时优先使用。
 - `英语专用音色文件`：语言为 `English` 或“用英语说/用英文说”时优先使用。
+- `开心/悲伤/生气/温柔/平静/兴奋/害羞语气音色文件`：指定对应语气时优先使用。
 
-专用音色留空时，会自动回退到通用音色。
+语气音色优先级高于语言音色。语气专用音色留空时，会自动回退到语言专用音色，再回退到通用音色。
 
 ### 部署：AstrBot 在 Docker，Qwen 在本机
 
@@ -93,6 +98,7 @@ cp host_worker_config.example.json host_worker_config.local.json
   "host": "0.0.0.0",
   "port": 8514,
   "voice_file": "",
+  "worker_token": "",
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -103,7 +109,8 @@ cp host_worker_config.example.json host_worker_config.local.json
 说明：
 
 - `host` 要保持 `0.0.0.0`，这样 Docker 容器才能访问宿主机 Worker。
-- `voice_file` 可以留空；如果开启后台音色同步，插件会在生成前通过 `/voice_config` 把当前音色热加载到 Worker。
+- `voice_file` 可以留空；插件会在每个 `/synthesize` 请求里携带 AstrBot 后台当前音色，Worker 会按任务原子加载并生成。
+- `worker_token` 可留空；如果填写，AstrBot 插件后台的 `worker_token` 必须一致。
 - `hf_home` 可以留空，也可以设置为宿主机上的 Hugging Face 缓存目录。
 - `fingerprint` 可保持示例值；Docker 模式下插件配置会信任外部 Worker。
 
@@ -159,6 +166,7 @@ pip install -r data/plugins/astrbot-plugin-qwen-local-tts/requirements.txt
 
 ```text
 server_url = http://host.docker.internal:8514
+worker_token =
 auto_start_server = false
 allow_external_server_config = true
 sync_voice_to_external_worker = true
@@ -166,6 +174,7 @@ host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_loc
 debug_logging = false
 require_at_in_group = true
 auto_detect_language = true
+default_tone = None
 voice_reply_max_chars = 220
 ```
 
@@ -195,6 +204,14 @@ voice_reply_max_chars = 220
 /qwentts [lang=english] Good morning.
 ```
 
+临时指定语气：
+
+```text
+/qwentts [tone=happy] 今天真不错。
+/qwentts [lang=japanese] [tone=excited] おはようございます。
+/qwentts tone=gentle lang=chinese 早点休息。
+```
+
 自然语言触发会先让 AstrBot 当前 LLM 回答，再把 LLM 的回答转成语音：
 
 ```text
@@ -203,9 +220,13 @@ voice_reply_max_chars = 220
 用日语说 夸我一句
 用日文说 介绍一下你自己
 用英语说 介绍一下你自己
+用开心语气说 介绍一下你自己
+用日语开心地说 夸我一句
 ```
 
 `lang` 支持 `auto`、`chinese`、`english`、`japanese`、`korean`、`french`、`german`、`spanish`、`portuguese`、`russian`、`italian`，也支持 `中文`、`日语`、`日文`、`英语` 等中文写法。
+
+`tone` 支持 `happy`、`sad`、`angry`、`gentle`、`calm`、`excited`、`shy`，也支持 `开心`、`伤心`、`生气`、`温柔`、`平静`、`兴奋`、`害羞` 等中文写法。直接 `/qwentts` 时语气主要用于选择对应 `.pt` 音色；“用开心语气说”这类自然触发还会把语气要求加入 LLM 提示。
 
 注意：QQ 官方机器人接口可能不支持语音消息。推荐使用 QQ 个人号 / OneBot v11 平台，例如 NapCat 或 aiocqhttp。
 
@@ -240,7 +261,7 @@ extra_hosts:
 
 #### 后台换音色不生效
 
-开启 `sync_voice_to_external_worker` 后，插件会在每次生成前调用宿主机 Worker 的 `/voice_config` 接口热加载当前音色。旧版本 Worker 不支持该接口，或 `host_plugin_data_dir` 未填写时，Worker 可能仍然使用启动时的旧音色。
+当前版本会把本次要用的音色随 `/synthesize` 请求一起发给 Worker，Worker 在队列任务内加载对应音色并立即生成。旧版本 Worker 只支持通过 `/voice_config` 改全局音色，遇到并发时可能出现音色串用；请同时更新插件和宿主机 Worker。
 
 #### 私聊和群聊音色听起来不一样
 
@@ -261,6 +282,7 @@ extra_hosts:
 - 优先指定语言，例如 `/qwentts [lang=chinese] 你好`。
 - 保持 `auto_detect_language = true`，插件会在默认 `Auto` 时按文本自动改用 `Chinese`、`Japanese`、`Korean` 或 `English`。
 - 自然语言触发会受到 `voice_reply_max_chars` 限制，避免 LLM 回复太长。
+- Worker 是 FIFO 队列；如果前面还有长任务，当前请求会排队等待。可通过 `/health` 查看 `active_request`、`queued_count` 和 `queued_requests`。
 - 如果 Worker 长时间占用模型，可重启宿主机 Worker 后重试。
 
 #### 麦克风或 WebUI 和插件无关
@@ -272,7 +294,7 @@ extra_hosts:
 如果要排查问题：
 
 - 在 AstrBot 插件配置中将 `debug_logging` 改为 `true`，用于打印 AstrBot 侧的健康检查、请求开始/结束、耗时和错误信息。
-- 在宿主机 `host_worker_config.local.json` 中将 `debug_logging` 改为 `true`，用于打印 Qwen Worker 侧的模型加载、音色加载、生成耗时和异常堆栈。
+- 在宿主机 `host_worker_config.local.json` 中将 `debug_logging` 改为 `true`，用于打印 Qwen Worker 侧的模型加载、音色加载、排队、生成耗时和异常堆栈。
 - Debug 日志只记录文本长度，不记录完整待合成文本。
 
 [返回顶部](#astrbot-plugin-qwen-local-tts)
@@ -287,11 +309,15 @@ This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance ru
 
 - Provides `/qwentts <text>` for direct QQ voice-message generation.
 - Supports `/qwentts [lang=chinese] <text>` for per-message language override.
+- Supports tone overrides such as `/qwentts [tone=happy] <text>` and "用开心语气说".
 - Supports natural triggers such as "用语音回答", "用中文说", and "用日语说": the plugin first asks AstrBot's current LLM, then turns the LLM reply into a QQ voice message.
 - Group chats require mentioning the bot by default, so ordinary group messages do not trigger TTS accidentally.
 - Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
-- Automatically hot-syncs the voice selected in AstrBot settings to the host worker before synthesis.
+- Sends the voice selected in AstrBot settings with each synthesis request, so changing voices does not require restarting the worker.
 - Supports separate `.pt` voice files for Chinese, Japanese, and English.
+- Supports separate tone `.pt` voice files for happy, sad, angry, gentle, calm, excited, and shy speech.
+- The worker has a single-thread FIFO queue, so concurrent requests do not overwrite each other's selected voice.
+- Optional worker token support adds a light authentication layer when the worker is reachable from Docker.
 - Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
 - Provides switchable debug logs for diagnosing Docker connectivity, worker startup, and synthesis errors.
 
@@ -331,8 +357,9 @@ The plugin settings can hold separate voices:
 - `中文专用音色文件`: used first when the language is `Chinese` or the message says "用中文说".
 - `日语专用音色文件`: used first when the language is `Japanese` or the message says "用日语说/用日文说".
 - `英语专用音色文件`: used first when the language is `English` or the message says "用英语说/用英文说".
+- Tone voice fields for happy, sad, angry, gentle, calm, excited, and shy: used first when that tone is requested.
 
-If a language-specific voice is empty, the plugin falls back to the default voice.
+Tone voices have priority over language voices. If the requested tone voice is empty, the plugin falls back to the language-specific voice, then to the default voice.
 
 ### Deployment: AstrBot in Docker, Qwen on Host
 
@@ -368,6 +395,7 @@ Edit `host_worker_config.local.json` and at least check these fields:
   "host": "0.0.0.0",
   "port": 8514,
   "voice_file": "",
+  "worker_token": "",
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -378,7 +406,8 @@ Edit `host_worker_config.local.json` and at least check these fields:
 Notes:
 
 - Keep `host` as `0.0.0.0` so the Docker container can reach the host worker.
-- `voice_file` can be empty; when voice sync is enabled, the plugin calls `/voice_config` before synthesis and hot-loads the current voice into the worker.
+- `voice_file` can be empty; every `/synthesize` request carries the voice currently selected in AstrBot settings, and the worker loads that voice for the queued task before generation.
+- `worker_token` can be empty; if you set it, the AstrBot plugin config must use the same `worker_token`.
 - `hf_home` can be empty, or point to a Hugging Face cache directory on the host.
 - `fingerprint` can keep the example value; Docker mode trusts the external worker config.
 
@@ -434,6 +463,7 @@ Set these values in the plugin config:
 
 ```text
 server_url = http://host.docker.internal:8514
+worker_token =
 auto_start_server = false
 allow_external_server_config = true
 sync_voice_to_external_worker = true
@@ -441,6 +471,7 @@ host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_loc
 debug_logging = false
 require_at_in_group = true
 auto_detect_language = true
+default_tone = None
 voice_reply_max_chars = 220
 ```
 
@@ -470,6 +501,14 @@ Override the language for one message:
 /qwentts [lang=english] Good morning.
 ```
 
+Override the tone for one message:
+
+```text
+/qwentts [tone=happy] 今天真不错。
+/qwentts [lang=japanese] [tone=excited] おはようございます。
+/qwentts tone=gentle lang=chinese 早点休息。
+```
+
 Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
 
 ```text
@@ -478,9 +517,13 @@ Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
 用日语说 夸我一句
 用日文说 介绍一下你自己
 用英语说 介绍一下你自己
+用开心语气说 介绍一下你自己
+用日语开心地说 夸我一句
 ```
 
 `lang` supports `auto`, `chinese`, `english`, `japanese`, `korean`, `french`, `german`, `spanish`, `portuguese`, `russian`, and `italian`, plus Chinese aliases such as `中文`, `日语`, `日文`, and `英语`.
+
+`tone` supports `happy`, `sad`, `angry`, `gentle`, `calm`, `excited`, and `shy`, plus Chinese aliases such as `开心`, `伤心`, `生气`, `温柔`, `平静`, `兴奋`, and `害羞`. For direct `/qwentts`, tone mainly selects the matching `.pt` voice file. For natural triggers such as "用开心语气说", the tone is also added to the LLM prompt.
 
 Note: QQ official bot APIs may not support voice messages. QQ personal-account / OneBot v11 platforms such as NapCat or aiocqhttp are the intended targets.
 
@@ -515,7 +558,7 @@ If voice sync is disabled, `voice_file` must be set in the host worker config, a
 
 #### Voice Changes Do Not Take Effect
 
-With `sync_voice_to_external_worker` enabled, the plugin calls the host worker's `/voice_config` endpoint before each synthesis request. Older workers do not support this endpoint, and an empty `host_plugin_data_dir` can leave the worker using the voice file it loaded at startup.
+The current version sends the selected voice with each `/synthesize` request, and the worker loads that voice inside the queued task before generation. Older workers only changed a global voice through `/voice_config`; under concurrent requests that could make voices leak across requests. Update both the plugin and the host worker together.
 
 #### Private and Group Chats Sound Different
 
@@ -536,6 +579,7 @@ Recommended fixes:
 - Prefer an explicit language, for example `/qwentts [lang=chinese] 你好`.
 - Keep `auto_detect_language = true`; when the default language is `Auto`, the plugin will infer `Chinese`, `Japanese`, `Korean`, or `English` from the text.
 - Natural LLM voice replies are limited by `voice_reply_max_chars` to avoid very long speech.
+- The worker is FIFO queued; if a long request is already active, the current request waits in line. Check `/health` for `active_request`, `queued_count`, and `queued_requests`.
 - If the worker is stuck for a long time, restart the host worker and try again.
 
 #### WebUI Microphone Is Unrelated
@@ -547,7 +591,7 @@ This plugin does not depend on the Qwen3-TTS Gradio WebUI. The WebUI is only use
 When troubleshooting:
 
 - Set `debug_logging` to `true` in the AstrBot plugin config to print AstrBot-side health checks, request start/end events, elapsed time, and error details.
-- Set `debug_logging` to `true` in the host `host_worker_config.local.json` to print Qwen worker-side model loading, voice loading, synthesis timing, and exception stack traces.
+- Set `debug_logging` to `true` in the host `host_worker_config.local.json` to print Qwen worker-side model loading, voice loading, queue events, synthesis timing, and exception stack traces.
 - Debug logs record text length only. They do not record the full synthesis text.
 
 [Back to top](#astrbot-plugin-qwen-local-tts)

@@ -5,6 +5,12 @@
     "default": "http://host.docker.internal:8514",
     "hint": "用于 /qwentts 指令访问本机 Qwen 服务。AstrBot 在 Docker 中运行时通常填写 http://host.docker.internal:8514。"
   },
+  "worker_token": {
+    "description": "Worker 访问令牌",
+    "type": "string",
+    "default": "",
+    "hint": "可选。填写后插件会在请求 Worker 时发送 X-Qwen-Worker-Token。宿主机 Worker 配置中的 worker_token 必须与这里一致；留空则不启用鉴权。"
+  },
   "auto_start_server": {
     "description": "自动启动本地 Qwen Worker",
     "type": "bool",
@@ -21,7 +27,7 @@
     "description": "同步后台音色到外部 Worker",
     "type": "bool",
     "default": true,
-    "hint": "开启后，每次生成前会把 AstrBot 后台当前选择的音色文件热加载到宿主机 Worker。适合 AstrBot 在 Docker 中、Qwen 在本机运行的部署。"
+    "hint": "兼容旧版 Worker 的热同步开关。当前版本会把本次音色随 /synthesize 请求一起发送，Worker 在队列任务内加载对应音色。"
   },
   "host_plugin_data_dir": {
     "description": "宿主机插件数据目录",
@@ -118,6 +124,62 @@
     "default": [],
     "file_types": ["pt", "pth"],
     "hint": "合成语言为 English，或触发“用英语说/用英文说”时优先使用。留空则使用通用 Qwen 音色文件。"
+  },
+  "default_tone": {
+    "description": "默认说话语气",
+    "type": "string",
+    "default": "None",
+    "options": ["None", "happy", "sad", "angry", "gentle", "calm", "excited", "shy"],
+    "hint": "默认不指定语气。QQ 中也可以临时覆盖，例如 /qwentts [tone=happy] 你好，或发送“用开心语气说 介绍一下你自己”。"
+  },
+  "voice_file_tone_happy": {
+    "description": "开心语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定开心/高兴/快乐语气时优先使用。留空则回退到语言专用音色，再回退到通用音色。"
+  },
+  "voice_file_tone_sad": {
+    "description": "悲伤语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定悲伤/伤心/难过语气时优先使用。"
+  },
+  "voice_file_tone_angry": {
+    "description": "生气语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定生气/愤怒语气时优先使用。"
+  },
+  "voice_file_tone_gentle": {
+    "description": "温柔语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定温柔/轻柔语气时优先使用。"
+  },
+  "voice_file_tone_calm": {
+    "description": "平静语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定平静/冷静语气时优先使用。"
+  },
+  "voice_file_tone_excited": {
+    "description": "兴奋语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定兴奋/元气/激动语气时优先使用。"
+  },
+  "voice_file_tone_shy": {
+    "description": "害羞语气音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "指定害羞/撒娇语气时优先使用。"
   },
   "reference_audio_file": {
     "description": "备用参考音频",

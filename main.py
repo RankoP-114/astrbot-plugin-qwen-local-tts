@@ -74,21 +74,110 @@ LANGUAGE_LABELS = {
     "Italian": "意大利语",
 }
 
+TONE_ALIASES = {
+    "none": "",
+    "default": "",
+    "auto": "",
+    "无": "",
+    "默认": "",
+    "happy": "happy",
+    "cheerful": "happy",
+    "joyful": "happy",
+    "开心": "happy",
+    "高兴": "happy",
+    "快乐": "happy",
+    "愉快": "happy",
+    "sad": "sad",
+    "悲伤": "sad",
+    "伤心": "sad",
+    "难过": "sad",
+    "angry": "angry",
+    "mad": "angry",
+    "生气": "angry",
+    "愤怒": "angry",
+    "gentle": "gentle",
+    "soft": "gentle",
+    "tender": "gentle",
+    "温柔": "gentle",
+    "轻柔": "gentle",
+    "calm": "calm",
+    "peaceful": "calm",
+    "平静": "calm",
+    "冷静": "calm",
+    "excited": "excited",
+    "energetic": "excited",
+    "元气": "excited",
+    "兴奋": "excited",
+    "激动": "excited",
+    "shy": "shy",
+    "cute": "shy",
+    "害羞": "shy",
+    "撒娇": "shy",
+}
+
+TONE_LABELS = {
+    "happy": "开心",
+    "sad": "悲伤",
+    "angry": "生气",
+    "gentle": "温柔",
+    "calm": "平静",
+    "excited": "兴奋",
+    "shy": "害羞",
+}
+
+TONE_REPLY_RULES = {
+    "happy": "回复语气要开心、轻快，但不要夸张。",
+    "sad": "回复语气要低落、柔和，但不要写哭腔说明。",
+    "angry": "回复语气要有点生气、直接，但不要攻击用户。",
+    "gentle": "回复语气要温柔、亲切。",
+    "calm": "回复语气要平静、稳重。",
+    "excited": "回复语气要兴奋、有活力，但不要过度使用感叹号。",
+    "shy": "回复语气要害羞、可爱，但不要写括号动作。",
+}
+
 LANGUAGE_PATTERN = "|".join(
     re.escape(item)
     for item in sorted(LANGUAGE_ALIASES, key=len, reverse=True)
 )
+TONE_PATTERN = "|".join(
+    re.escape(item)
+    for item in sorted((item for item in TONE_ALIASES if TONE_ALIASES[item]), key=len, reverse=True)
+)
 LANGUAGE_OPTION_RE = re.compile(
     r"\[(?:lang|language|语言)\s*=\s*([^\]]+)\]",
+    re.IGNORECASE,
+)
+TONE_OPTION_RE = re.compile(
+    r"\[(?:tone|style|emotion|语气|情绪|风格)\s*=\s*([^\]]+)\]",
     re.IGNORECASE,
 )
 LANGUAGE_PREFIX_RE = re.compile(
     r"^(?:lang|language|语言)\s*=\s*([^\s]+)\s*",
     re.IGNORECASE,
 )
+TONE_PREFIX_RE = re.compile(
+    r"^(?:tone|style|emotion|语气|情绪|风格)\s*=\s*([^\s]+)\s*",
+    re.IGNORECASE,
+)
 QWENTTS_COMMAND_RE = re.compile(
     r"(?:^|\s)/?qwentts(?:\s+|$)(?P<text>.*)$",
     re.IGNORECASE | re.DOTALL,
+)
+LEADING_LANGUAGE_TONE_REQUEST_RE = re.compile(
+    rf"^(?:请)?用(?P<lang>{LANGUAGE_PATTERN})(?P<tone>{TONE_PATTERN})(?:的|地)?"
+    r"(?:语气|口吻|情绪|风格)?(?:语音)?"
+    r"(?P<verb>回答|回复|说|讲)(?:一下)?[：:，,\s]*(?P<prompt>.+)$",
+    re.IGNORECASE,
+)
+LEADING_TONE_LANGUAGE_REQUEST_RE = re.compile(
+    rf"^(?:请)?用(?P<tone>{TONE_PATTERN})(?:的|地)?(?P<lang>{LANGUAGE_PATTERN})"
+    r"(?:语音)?(?P<verb>回答|回复|说|讲)(?:一下)?[：:，,\s]*(?P<prompt>.+)$",
+    re.IGNORECASE,
+)
+LEADING_TONE_REQUEST_RE = re.compile(
+    rf"^(?:请)?用(?P<tone>{TONE_PATTERN})(?:的|地)?(?:语气|口吻|情绪|风格)?(?:语音)?"
+    r"(?P<verb>回答|回复|说|讲)(?:一下)?[：:，,\s]*(?P<prompt>.+)$",
+    re.IGNORECASE,
 )
 LEADING_LANGUAGE_REQUEST_RE = re.compile(
     rf"^(?:请)?用(?P<lang>{LANGUAGE_PATTERN})(?:语音)?"
@@ -102,6 +191,7 @@ LEADING_VOICE_REQUEST_RE = re.compile(
 )
 TRAILING_VOICE_REQUEST_RE = re.compile(
     rf"^(?P<prompt>.+?)[，,。；;\s]+(?:请)?用(?P<lang>{LANGUAGE_PATTERN})?"
+    rf"(?P<tone>{TONE_PATTERN})?(?:的|地)?(?:语气|口吻|情绪|风格)?"
     r"(?:语音)?(?P<verb>回答|回复|说|讲)(?:一下)?[。.!！\s]*$",
     re.IGNORECASE,
 )
@@ -132,6 +222,17 @@ def _normalize_language(value: Any) -> str | None:
     if not text:
         return None
     return LANGUAGE_ALIASES.get(text.lower())
+
+
+def _normalize_tone(value: Any) -> str | None:
+    text = str(value or "").strip().strip("[]").strip()
+    if not text:
+        return None
+    normalized = re.sub(r"[\s_-]+", "", text.lower())
+    tone = TONE_ALIASES.get(normalized)
+    if tone == "":
+        return None
+    return tone
 
 
 def _detect_language_from_text(text: str) -> str:
@@ -171,14 +272,15 @@ class QwenLocalTTSPlugin(Star):
 
         event.stop_event()
         text = self._qwentts_command_text(event, text)
-        language_override, text = self._parse_language_option(text)
+        language_override, tone_override, text = self._parse_tts_options(text)
         language = self._resolve_language(text, language_override)
+        tone = self._resolve_tone(tone_override)
         if not text:
-            yield event.plain_result("用法：/qwentts [lang=chinese] 要合成的文本")
+            yield event.plain_result("用法：/qwentts [lang=chinese] [tone=happy] 要合成的文本")
             return
         try:
             self._refresh_client_config()
-            audio_path = await self.client.synthesize(text, language=language)
+            audio_path = await self.client.synthesize(text, language=language, tone=tone)
             yield event.chain_result([Comp.Record(file=audio_path, url=audio_path)])
         except Exception as exc:
             logger.error("Qwen Local TTS failed: %r", exc, exc_info=True)
@@ -200,23 +302,26 @@ class QwenLocalTTSPlugin(Star):
         if not parsed:
             return
 
-        language_override, prompt = parsed
+        language_override, tone_override, prompt = parsed
         language = self._resolve_language(prompt, language_override)
+        tone = self._resolve_tone(tone_override)
         if not prompt:
             return
 
         event.set_extra("qwen_local_tts_voice_reply", True)
         event.set_extra("qwen_local_tts_language", language)
+        event.set_extra("qwen_local_tts_tone", tone or "")
         event.set_extra("qwen_local_tts_source_prompt_len", len(prompt))
 
         self._debug(
-            "voice reply LLM request matched prompt_len=%s language=%s",
+            "voice reply LLM request matched prompt_len=%s language=%s tone=%s",
             len(prompt),
             language,
+            tone or "",
         )
         if req is not None:
-            req.prompt = self._build_voice_reply_prompt(prompt, language)
-            voice_system_prompt = self._build_voice_reply_system_prompt(language)
+            req.prompt = self._build_voice_reply_prompt(prompt, language, tone)
+            voice_system_prompt = self._build_voice_reply_system_prompt(language, tone)
             req.system_prompt = (
                 ((getattr(req, "system_prompt", "") or "").rstrip() + "\n\n" + voice_system_prompt)
                 .strip()
@@ -254,9 +359,10 @@ class QwenLocalTTSPlugin(Star):
 
         language = str(event.get_extra("qwen_local_tts_language", "Auto") or "Auto")
         language = self._resolve_language(text, language)
+        tone = str(event.get_extra("qwen_local_tts_tone", "") or "") or None
         try:
             self._refresh_client_config()
-            audio_path = await self.client.synthesize(text, language=language)
+            audio_path = await self.client.synthesize(text, language=language, tone=tone)
             result.chain = [Comp.Record(file=audio_path, url=audio_path)]
             result.use_t2i_ = False
             result.use_markdown_ = False
@@ -320,6 +426,9 @@ class QwenLocalTTSPlugin(Star):
     def _default_language(self) -> str:
         return _normalize_language(self.config.get("language", "Auto")) or "Auto"
 
+    def _default_tone(self) -> str | None:
+        return _normalize_tone(self.config.get("default_tone", ""))
+
     def _resolve_language(self, text: str, override: str | None = None) -> str:
         if override:
             return override
@@ -328,65 +437,109 @@ class QwenLocalTTSPlugin(Star):
             return _detect_language_from_text(text)
         return language
 
-    def _parse_language_option(self, text: str) -> tuple[str | None, str]:
+    def _resolve_tone(self, override: str | None = None) -> str | None:
+        return override or self._default_tone()
+
+    def _parse_tts_options(self, text: str) -> tuple[str | None, str | None, str]:
         remaining = (text or "").strip()
         language: str | None = None
+        tone: str | None = None
 
         match = LANGUAGE_OPTION_RE.search(remaining)
         if match:
             language = _normalize_language(match.group(1)) or language
             remaining = (remaining[: match.start()] + remaining[match.end() :]).strip()
 
-        match = LANGUAGE_PREFIX_RE.match(remaining)
+        match = TONE_OPTION_RE.search(remaining)
         if match:
-            language = _normalize_language(match.group(1)) or language
-            remaining = remaining[match.end() :].strip()
+            tone = _normalize_tone(match.group(1)) or tone
+            remaining = (remaining[: match.start()] + remaining[match.end() :]).strip()
 
-        match = LEADING_LANGUAGE_REQUEST_RE.match(remaining)
-        if match:
-            language = _normalize_language(match.group("lang")) or language
-            remaining = match.group("prompt").strip()
+        for _ in range(4):
+            match = LANGUAGE_PREFIX_RE.match(remaining)
+            if match:
+                language = _normalize_language(match.group(1)) or language
+                remaining = remaining[match.end() :].strip()
+                continue
+            match = TONE_PREFIX_RE.match(remaining)
+            if match:
+                tone = _normalize_tone(match.group(1)) or tone
+                remaining = remaining[match.end() :].strip()
+                continue
+            break
 
-        return language, remaining
+        natural = self._match_natural_voice_request(remaining)
+        if natural:
+            natural_language, natural_tone, prompt = natural
+            language = natural_language or language
+            tone = natural_tone or tone
+            remaining = prompt
 
-    def _parse_voice_reply_request(self, text: str) -> tuple[str | None, str] | None:
+        return language, tone, remaining
+
+    def _parse_voice_reply_request(self, text: str) -> tuple[str | None, str | None, str] | None:
         normalized = (text or "").strip()
         if not normalized:
             return None
 
-        match = LEADING_LANGUAGE_REQUEST_RE.match(normalized)
-        if match:
-            return _normalize_language(match.group("lang")), match.group("prompt").strip()
+        natural = self._match_natural_voice_request(normalized)
+        if natural:
+            return natural
 
         match = LEADING_VOICE_REQUEST_RE.match(normalized)
         if match:
-            return None, match.group("prompt").strip()
+            return None, None, match.group("prompt").strip()
 
         match = TRAILING_VOICE_REQUEST_RE.match(normalized)
         if match:
-            return _normalize_language(match.group("lang")), match.group("prompt").strip()
+            return (
+                _normalize_language(match.group("lang")),
+                _normalize_tone(match.group("tone")),
+                match.group("prompt").strip(),
+            )
 
         return None
 
-    def _build_voice_reply_system_prompt(self, language: str) -> str:
+    def _match_natural_voice_request(self, text: str) -> tuple[str | None, str | None, str] | None:
+        normalized = (text or "").strip()
+        for pattern in (
+            LEADING_LANGUAGE_TONE_REQUEST_RE,
+            LEADING_TONE_LANGUAGE_REQUEST_RE,
+            LEADING_TONE_REQUEST_RE,
+            LEADING_LANGUAGE_REQUEST_RE,
+        ):
+            match = pattern.match(normalized)
+            if match:
+                return (
+                    _normalize_language(match.groupdict().get("lang")),
+                    _normalize_tone(match.groupdict().get("tone")),
+                    match.group("prompt").strip(),
+                )
+        return None
+
+    def _build_voice_reply_system_prompt(self, language: str, tone: str | None = None) -> str:
         language_label = LANGUAGE_LABELS.get(language, "用户要求的语言")
         if language == "Auto":
             language_rule = "使用用户消息中最自然的语言回答。"
         else:
             language_rule = f"必须使用{language_label}回答。"
+        tone_rule = TONE_REPLY_RULES.get(tone or "", "")
         return (
             "你正在为语音消息生成回复。"
             f"{language_rule}"
+            f"{tone_rule}"
             "只输出适合直接朗读的回复正文，不要写标题、列表、Markdown、括号动作或语音合成说明。"
             "回复要自然、简短。"
         )
 
-    def _build_voice_reply_prompt(self, prompt: str, language: str) -> str:
+    def _build_voice_reply_prompt(self, prompt: str, language: str, tone: str | None = None) -> str:
         max_chars = max(20, _config_int(self.config, "voice_reply_max_chars", 220))
         language_label = LANGUAGE_LABELS.get(language, "自然语言")
+        tone_label = TONE_LABELS.get(tone or "")
+        tone_clause = f"，语气偏{tone_label}" if tone_label else ""
         if language == "Auto":
-            return f"{prompt}\n\n请用适合直接朗读的方式简短回答，控制在 {max_chars} 个字符以内。"
-        return f"{prompt}\n\n请用{language_label}简短回答，控制在 {max_chars} 个字符以内。"
+            return f"{prompt}\n\n请用适合直接朗读的方式简短回答{tone_clause}，控制在 {max_chars} 个字符以内。"
+        return f"{prompt}\n\n请用{language_label}简短回答{tone_clause}，控制在 {max_chars} 个字符以内。"
 
     def _format_tts_error(self, exc: Exception) -> str:
         if isinstance(exc, TimeoutError):

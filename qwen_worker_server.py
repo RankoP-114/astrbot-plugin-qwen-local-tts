@@ -5,16 +5,18 @@ import io
 import json
 import logging
 import os
+import queue
 import threading
 import time
 import uuid
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import numpy as np
 import soundfile as sf
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
@@ -23,9 +25,13 @@ from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 CONFIG: dict[str, Any] = {}
 MODEL: Qwen3TTSModel | None = None
 VOICE_PROMPT: list[VoiceClonePromptItem] | None = None
+VOICE_CACHE: dict[str, list[VoiceClonePromptItem]] = {}
 LOCK = threading.Lock()
 ACTIVE_LOCK = threading.Lock()
 ACTIVE_REQUEST: dict[str, Any] | None = None
+QUEUE_LOCK = threading.Lock()
+QUEUED_REQUESTS: dict[str, dict[str, Any]] = {}
+SYNTHESIS_THREAD: threading.Thread | None = None
 LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
 
@@ -33,6 +39,12 @@ app = FastAPI(title="Qwen Local TTS Worker")
 class SynthesizeRequest(BaseModel):
     text: str
     language: str = "Auto"
+    tone: str = ""
+    voice_file: str = ""
+    voice_key: str = ""
+    reference_audio_file: str = ""
+    reference_text: str = ""
+    x_vector_only_mode: Optional[bool] = None
 
 
 class VoiceConfigRequest(BaseModel):
@@ -40,6 +52,19 @@ class VoiceConfigRequest(BaseModel):
     reference_audio_file: str = ""
     reference_text: str = ""
     x_vector_only_mode: bool = False
+
+
+@dataclass
+class SynthesisJob:
+    request_id: str
+    request: SynthesizeRequest
+    created_at: float
+    done: threading.Event = field(default_factory=threading.Event)
+    result: bytes | None = None
+    error: Exception | None = None
+
+
+JOB_QUEUE: queue.Queue[SynthesisJob] = queue.Queue()
 
 
 def dtype_from_str(value: str) -> torch.dtype:
@@ -76,14 +101,29 @@ def debug_log(message: str, *args: Any) -> None:
         LOGGER.debug("[QwenWorker] " + message, *args)
 
 
-def set_active_request(request_id: str, text_len: int, language: str, source: str) -> None:
+def require_worker_token(request: Request) -> None:
+    expected = str(CONFIG.get("worker_token") or "").strip()
+    if expected and request.headers.get("X-Qwen-Worker-Token") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def set_active_request(
+    request_id: str,
+    text_len: int,
+    language: str,
+    source: str,
+    tone: str = "",
+    voice_file_name: str = "",
+) -> None:
     global ACTIVE_REQUEST
     with ACTIVE_LOCK:
         ACTIVE_REQUEST = {
             "request_id": request_id,
             "text_len": text_len,
             "language": language,
+            "tone": tone,
             "source": source,
+            "voice_file_name": voice_file_name,
             "started_at": time.monotonic(),
         }
 
@@ -103,6 +143,40 @@ def active_request_snapshot() -> dict[str, Any] | None:
     started_at = float(snapshot.pop("started_at", time.monotonic()))
     snapshot["elapsed"] = round(time.monotonic() - started_at, 3)
     return snapshot
+
+
+def queue_request_snapshot(job: SynthesisJob) -> dict[str, Any]:
+    req = job.request
+    voice_file = str(req.voice_file or "").strip()
+    return {
+        "request_id": job.request_id,
+        "text_len": len((req.text or "").strip()),
+        "language": (req.language or CONFIG.get("language") or "Auto").strip() or "Auto",
+        "tone": (req.tone or "").strip(),
+        "voice_key": (req.voice_key or "").strip(),
+        "voice_file_name": os.path.basename(voice_file) if voice_file else "",
+        "created_at": job.created_at,
+    }
+
+
+def add_queued_request(job: SynthesisJob) -> None:
+    with QUEUE_LOCK:
+        QUEUED_REQUESTS[job.request_id] = queue_request_snapshot(job)
+
+
+def remove_queued_request(request_id: str) -> None:
+    with QUEUE_LOCK:
+        QUEUED_REQUESTS.pop(request_id, None)
+
+
+def queued_requests_snapshot() -> list[dict[str, Any]]:
+    now = time.monotonic()
+    with QUEUE_LOCK:
+        snapshots = [dict(item) for item in QUEUED_REQUESTS.values()]
+    for item in snapshots:
+        created_at = float(item.pop("created_at", now))
+        item["queued_for"] = round(now - created_at, 3)
+    return snapshots
 
 
 def voice_config_snapshot() -> dict[str, Any]:
@@ -169,6 +243,147 @@ def wav_bytes(wav: np.ndarray, sr: int) -> bytes:
     return buf.getvalue()
 
 
+def cached_voice_prompt(path: str) -> list[VoiceClonePromptItem]:
+    path = (path or "").strip()
+    if not path:
+        raise ValueError("voice_file is empty.")
+    if path not in VOICE_CACHE:
+        VOICE_CACHE[path] = load_voice_prompt(path)
+    return VOICE_CACHE[path]
+
+
+def prepare_voice_for_request(
+    req: SynthesizeRequest,
+) -> tuple[list[VoiceClonePromptItem] | None, str, str | None, bool, str, str]:
+    global VOICE_PROMPT
+    request_voice_file = (req.voice_file or "").strip()
+    request_reference_audio = (req.reference_audio_file or "").strip()
+    request_reference_text = (req.reference_text or "").strip()
+    voice_file = request_voice_file or str(CONFIG.get("voice_file") or "").strip()
+    reference_audio = request_reference_audio or str(CONFIG.get("reference_audio_file") or "").strip()
+    reference_text = request_reference_text or str(CONFIG.get("reference_text") or "").strip()
+    if req.x_vector_only_mode is None:
+        use_xvec = bool(CONFIG.get("x_vector_only_mode", False))
+    else:
+        use_xvec = bool(req.x_vector_only_mode)
+
+    validate_readable_path(voice_file, "voice_file")
+    validate_readable_path(reference_audio, "reference_audio_file")
+
+    with LOCK:
+        if voice_file:
+            voice_prompt = cached_voice_prompt(voice_file)
+            VOICE_PROMPT = voice_prompt
+            CONFIG["voice_file"] = voice_file
+            CONFIG["reference_audio_file"] = reference_audio
+            CONFIG["reference_text"] = reference_text
+            CONFIG["x_vector_only_mode"] = use_xvec
+            return voice_prompt, reference_audio, reference_text or None, use_xvec, "voice_prompt", voice_file
+
+        VOICE_PROMPT = None
+        CONFIG["voice_file"] = ""
+        CONFIG["reference_audio_file"] = reference_audio
+        CONFIG["reference_text"] = reference_text
+        CONFIG["x_vector_only_mode"] = use_xvec
+        return None, reference_audio, reference_text or None, use_xvec, "reference_audio", ""
+
+
+def synthesize_audio(req: SynthesizeRequest, request_id: str) -> bytes:
+    if MODEL is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is empty.")
+
+    started_at = time.monotonic()
+    language = (req.language or CONFIG.get("language") or "Auto").strip() or "Auto"
+    tone = (req.tone or "").strip()
+    generation = dict(CONFIG.get("generation") or {})
+    try:
+        voice_prompt, ref_audio, ref_text, use_xvec, source, voice_file = prepare_voice_for_request(req)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    voice_file_name = os.path.basename(voice_file) if voice_file else ""
+    debug_log(
+        "request %s synthesize start text_len=%s language=%s tone=%s source=%s voice_key=%s voice_file=%s",
+        request_id,
+        len(text),
+        language,
+        tone,
+        source,
+        req.voice_key or "",
+        voice_file_name,
+    )
+
+    set_active_request(request_id, len(text), language, source, tone, voice_file_name)
+    try:
+        if voice_prompt:
+            wavs, sr = MODEL.generate_voice_clone(
+                text=text,
+                language=language,
+                voice_clone_prompt=voice_prompt,
+                **generation,
+            )
+        else:
+            if not ref_audio:
+                raise ValueError("voice_file or reference_audio_file must be configured.")
+            if not use_xvec and not ref_text:
+                raise ValueError("reference_text is required unless x_vector_only_mode is enabled.")
+            wavs, sr = MODEL.generate_voice_clone(
+                text=text,
+                language=language,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                x_vector_only_mode=use_xvec,
+                **generation,
+            )
+    except Exception as exc:
+        if debug_enabled():
+            LOGGER.exception("[QwenWorker] request %s synthesize failed", request_id)
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        clear_active_request(request_id)
+
+    audio = wav_bytes(wavs[0], sr)
+    debug_log(
+        "request %s synthesize done sr=%s wavs=%s bytes=%s elapsed=%.3fs",
+        request_id,
+        sr,
+        len(wavs),
+        len(audio),
+        time.monotonic() - started_at,
+    )
+    return audio
+
+
+def synthesis_worker_loop() -> None:
+    while True:
+        job = JOB_QUEUE.get()
+        remove_queued_request(job.request_id)
+        try:
+            job.result = synthesize_audio(job.request, job.request_id)
+        except Exception as exc:
+            job.error = exc
+        finally:
+            job.done.set()
+            JOB_QUEUE.task_done()
+
+
+def start_synthesis_worker() -> None:
+    global SYNTHESIS_THREAD
+    if SYNTHESIS_THREAD and SYNTHESIS_THREAD.is_alive():
+        return
+    SYNTHESIS_THREAD = threading.Thread(
+        target=synthesis_worker_loop,
+        name="qwen-local-tts-fifo",
+        daemon=True,
+    )
+    SYNTHESIS_THREAD.start()
+
+
 @app.on_event("startup")
 def startup() -> None:
     global MODEL, VOICE_PROMPT
@@ -192,27 +407,34 @@ def startup() -> None:
     voice_file = CONFIG.get("voice_file") or ""
     if voice_file:
         debug_log("loading voice prompt file")
-        VOICE_PROMPT = load_voice_prompt(voice_file)
+        VOICE_PROMPT = cached_voice_prompt(voice_file)
         debug_log("voice prompt loaded items=%s", len(VOICE_PROMPT))
+    start_synthesis_worker()
     debug_log("startup complete elapsed=%.3fs", time.monotonic() - started_at)
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+def health(request: Request) -> dict[str, Any]:
+    require_worker_token(request)
+    active_request = active_request_snapshot()
+    queued_requests = queued_requests_snapshot()
     return {
         "ok": MODEL is not None,
         "model": CONFIG.get("model"),
         "debug_logging": debug_enabled(),
         "fingerprint": CONFIG.get("fingerprint", ""),
-        "busy": active_request_snapshot() is not None,
-        "active_request": active_request_snapshot(),
+        "busy": active_request is not None,
+        "active_request": active_request,
+        "queued_count": len(queued_requests),
+        "queued_requests": queued_requests,
         **voice_config_snapshot(),
     }
 
 
 @app.post("/voice_config")
-def update_voice_config(req: VoiceConfigRequest) -> dict[str, Any]:
+def update_voice_config(req: VoiceConfigRequest, request: Request) -> dict[str, Any]:
     """Hot-load the active voice without reloading the Qwen model."""
+    require_worker_token(request)
     global VOICE_PROMPT
     voice_file = (req.voice_file or "").strip()
     reference_audio_file = (req.reference_audio_file or "").strip()
@@ -227,7 +449,7 @@ def update_voice_config(req: VoiceConfigRequest) -> dict[str, Any]:
     )
     with LOCK:
         try:
-            loaded_voice_prompt = load_voice_prompt(voice_file) if voice_file else None
+            loaded_voice_prompt = cached_voice_prompt(voice_file) if voice_file else None
         except Exception as exc:
             if debug_enabled():
                 LOGGER.exception("[QwenWorker] voice config update failed")
@@ -250,7 +472,8 @@ def update_voice_config(req: VoiceConfigRequest) -> dict[str, Any]:
 
 
 @app.post("/synthesize")
-def synthesize(req: SynthesizeRequest) -> Response:
+def synthesize(req: SynthesizeRequest, request: Request) -> Response:
+    require_worker_token(request)
     if MODEL is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
     text = (req.text or "").strip()
@@ -258,60 +481,26 @@ def synthesize(req: SynthesizeRequest) -> Response:
         raise HTTPException(status_code=400, detail="Text is empty.")
 
     request_id = uuid.uuid4().hex[:8]
-    started_at = time.monotonic()
-    language = (req.language or CONFIG.get("language") or "Auto").strip() or "Auto"
-    generation = dict(CONFIG.get("generation") or {})
-    source = "voice_prompt" if VOICE_PROMPT else "reference_audio"
+    job = SynthesisJob(request_id=request_id, request=req, created_at=time.monotonic())
+    add_queued_request(job)
     debug_log(
-        "request %s synthesize start text_len=%s language=%s source=%s",
+        "request %s queued text_len=%s language=%s tone=%s queued_count=%s",
         request_id,
         len(text),
-        language,
-        source,
+        (req.language or CONFIG.get("language") or "Auto").strip() or "Auto",
+        (req.tone or "").strip(),
+        len(queued_requests_snapshot()),
     )
-
-    with LOCK:
-        set_active_request(request_id, len(text), language, source)
-        try:
-            if VOICE_PROMPT:
-                wavs, sr = MODEL.generate_voice_clone(
-                    text=text,
-                    language=language,
-                    voice_clone_prompt=VOICE_PROMPT,
-                    **generation,
-                )
-            else:
-                ref_audio = CONFIG.get("reference_audio_file") or ""
-                if not ref_audio:
-                    raise ValueError("voice_file or reference_audio_file must be configured.")
-                ref_text = (CONFIG.get("reference_text") or "").strip() or None
-                use_xvec = bool(CONFIG.get("x_vector_only_mode", False))
-                if not use_xvec and not ref_text:
-                    raise ValueError("reference_text is required unless x_vector_only_mode is enabled.")
-                wavs, sr = MODEL.generate_voice_clone(
-                    text=text,
-                    language=language,
-                    ref_audio=ref_audio,
-                    ref_text=ref_text,
-                    x_vector_only_mode=use_xvec,
-                    **generation,
-                )
-        except Exception as exc:
-            if debug_enabled():
-                LOGGER.exception("[QwenWorker] request %s synthesize failed", request_id)
-            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
-        finally:
-            clear_active_request(request_id)
-    audio = wav_bytes(wavs[0], sr)
-    debug_log(
-        "request %s synthesize done sr=%s wavs=%s bytes=%s elapsed=%.3fs",
-        request_id,
-        sr,
-        len(wavs),
-        len(audio),
-        time.monotonic() - started_at,
-    )
-    return Response(content=audio, media_type="audio/wav")
+    JOB_QUEUE.put(job)
+    job.done.wait()
+    if job.error:
+        if isinstance(job.error, HTTPException):
+            raise job.error
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(job.error).__name__}: {job.error}",
+        ) from job.error
+    return Response(content=job.result or b"", media_type="audio/wav")
 
 
 def main() -> int:
