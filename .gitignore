@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+host_worker_config.local.json
+*.log

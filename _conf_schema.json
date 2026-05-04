@@ -1,0 +1,134 @@
+{
+  "server_url": {
+    "description": "本地 Qwen Worker 地址",
+    "type": "string",
+    "default": "http://host.docker.internal:8514",
+    "hint": "用于 /qwentts 指令和 TTS Provider 访问本机 Qwen 服务。AstrBot 在 Docker 中运行时通常填写 http://host.docker.internal:8514。"
+  },
+  "auto_start_server": {
+    "description": "自动启动本地 Qwen Worker",
+    "type": "bool",
+    "default": false,
+    "hint": "当 Worker 未运行时，使用下方配置的 Python 自动启动 qwen_worker_server.py。AstrBot 在 Docker 中运行且 Qwen 在宿主机运行时建议关闭。"
+  },
+  "allow_external_server_config": {
+    "description": "信任外部 Worker 配置",
+    "type": "bool",
+    "default": true,
+    "hint": "当 AstrBot 在 Docker 中运行，并访问 macOS 宿主机上已启动的 Qwen Worker 时开启。开启后不会要求插件配置与 Worker 指纹完全一致。"
+  },
+  "python_bin": {
+    "description": "Qwen3-TTS Python 路径",
+    "type": "string",
+    "default": "",
+    "hint": "用于自动启动 Worker 的 Python。应填写 Qwen3-TTS 虚拟环境里的 python。Docker 访问宿主机 Worker 时可忽略。"
+  },
+  "qwen_repo_dir": {
+    "description": "Qwen3-TTS 仓库目录",
+    "type": "string",
+    "default": ""
+  },
+  "model": {
+    "description": "Qwen3-TTS 模型",
+    "type": "string",
+    "default": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+  },
+  "device": {
+    "description": "推理设备",
+    "type": "string",
+    "default": "mps",
+    "options": ["mps", "cuda:0", "cpu"]
+  },
+  "dtype": {
+    "description": "模型精度",
+    "type": "string",
+    "default": "bfloat16",
+    "options": ["bfloat16", "float16", "float32"]
+  },
+  "hf_home": {
+    "description": "Hugging Face 缓存目录",
+    "type": "string",
+    "default": ""
+  },
+  "hf_endpoint": {
+    "description": "Hugging Face 镜像地址",
+    "type": "string",
+    "default": "https://hf-mirror.com"
+  },
+  "voice_file": {
+    "description": "Qwen 音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "上传 Qwen3-TTS WebUI 的 Save Voice File 保存出来的 voice_clone_prompt_*.pt 文件。优先使用该文件生成语音。"
+  },
+  "reference_audio_file": {
+    "description": "备用参考音频",
+    "type": "file",
+    "default": [],
+    "file_types": ["wav", "mp3", "flac", "m4a", "ogg"],
+    "hint": "未配置音色文件时使用的备用参考音频。除非开启“仅使用说话人向量”，否则必须填写参考音频文本。"
+  },
+  "reference_text": {
+    "description": "参考音频文本",
+    "type": "text",
+    "default": ""
+  },
+  "x_vector_only_mode": {
+    "description": "仅使用说话人向量",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后参考音频可以不填文本，但音色克隆效果通常会变差。"
+  },
+  "language": {
+    "description": "默认合成语言",
+    "type": "string",
+    "default": "Auto",
+    "options": ["Auto", "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish", "Portuguese", "Russian", "Italian"]
+  },
+  "host": {
+    "description": "Worker 监听地址",
+    "type": "string",
+    "default": "127.0.0.1"
+  },
+  "port": {
+    "description": "Worker 监听端口",
+    "type": "int",
+    "default": 8514
+  },
+  "request_timeout": {
+    "description": "TTS 请求超时秒数",
+    "type": "float",
+    "default": 180.0
+  },
+  "startup_timeout": {
+    "description": "Worker 启动超时秒数",
+    "type": "float",
+    "default": 240.0
+  },
+  "max_new_tokens": {
+    "description": "最大生成 token 数",
+    "type": "int",
+    "default": 2048
+  },
+  "temperature": {
+    "description": "采样温度",
+    "type": "float",
+    "default": 0.9
+  },
+  "top_k": {
+    "description": "Top-k 采样",
+    "type": "int",
+    "default": 50
+  },
+  "top_p": {
+    "description": "Top-p 采样",
+    "type": "float",
+    "default": 1.0
+  },
+  "repetition_penalty": {
+    "description": "重复惩罚",
+    "type": "float",
+    "default": 1.05
+  }
+}

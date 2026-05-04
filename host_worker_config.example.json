@@ -1,0 +1,28 @@
+{
+  "host": "0.0.0.0",
+  "port": 8514,
+  "fingerprint": "external-host-worker",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+  "device": "mps",
+  "dtype": "bfloat16",
+  "attn_implementation": "sdpa",
+  "hf_home": "",
+  "hf_endpoint": "https://hf-mirror.com",
+  "qwen_repo_dir": "",
+  "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
+  "reference_audio_file": "",
+  "reference_text": "",
+  "x_vector_only_mode": false,
+  "language": "Auto",
+  "generation": {
+    "max_new_tokens": 2048,
+    "temperature": 0.9,
+    "top_k": 50,
+    "top_p": 1.0,
+    "repetition_penalty": 1.05,
+    "subtalker_dosample": true,
+    "subtalker_top_k": 50,
+    "subtalker_top_p": 1.0,
+    "subtalker_temperature": 0.9
+  }
+}

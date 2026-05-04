@@ -1,0 +1,9 @@
+name: astrbot_plugin_qwen_local_tts
+display_name: Qwen Local TTS
+desc: Use a local Qwen3-TTS voice file as an AstrBot TTS provider and QQ voice command.
+version: v0.1.0
+author: RankoP-114
+repo: ""
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.16,<5"
