@@ -30,6 +30,7 @@ LANGUAGE_ALIASES = {
     "jp": "Japanese",
     "japanese": "Japanese",
     "日语": "Japanese",
+    "日文": "Japanese",
     "日本语": "Japanese",
     "en": "English",
     "english": "English",
@@ -171,6 +172,7 @@ class QwenLocalTTSPlugin(Star):
             yield event.plain_result("用法：/qwentts [lang=chinese] 要合成的文本")
             return
         try:
+            self._refresh_client_config()
             audio_path = await self.client.synthesize(text, language=language)
             yield event.chain_result([Comp.Record(file=audio_path, url=audio_path)])
         except Exception as exc:
@@ -248,6 +250,7 @@ class QwenLocalTTSPlugin(Star):
         language = str(event.get_extra("qwen_local_tts_language", "Auto") or "Auto")
         language = self._resolve_language(text, language)
         try:
+            self._refresh_client_config()
             audio_path = await self.client.synthesize(text, language=language)
             result.chain = [Comp.Record(file=audio_path, url=audio_path)]
             result.use_t2i_ = False
@@ -263,6 +266,9 @@ class QwenLocalTTSPlugin(Star):
     def _debug(self, message: str, *args: Any) -> None:
         if _config_bool(self.config, "debug_logging", False):
             logger.debug("[QwenLocalTTS] " + message, *args)
+
+    def _refresh_client_config(self) -> None:
+        self.client.refresh_config(dict(self.config or {}))
 
     def _message_text(self, event: AstrMessageEvent) -> str:
         try:

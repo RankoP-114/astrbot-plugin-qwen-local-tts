@@ -95,19 +95,65 @@ class QwenLocalTTSClient:
         self.allow_external_server_config = _bool(
             self.config.get("allow_external_server_config"), not self.auto_start_server
         )
+        self.sync_voice_to_external_worker = _bool(
+            self.config.get("sync_voice_to_external_worker"), True
+        )
+        self.host_plugin_data_dir = str(self.config.get("host_plugin_data_dir") or "").strip()
         self.debug_logging = _bool(self.config.get("debug_logging"), False)
         self.request_timeout = _float(self.config.get("request_timeout"), 180.0)
         self.startup_timeout = _float(self.config.get("startup_timeout"), 240.0)
         self.process: asyncio.subprocess.Process | None = None
+        self._last_synced_voice_payload = ""
+        self._last_health: dict[str, Any] | None = None
+        self._voice_config_endpoint_missing = False
         self.config_payload = self._build_worker_config()
         self.fingerprint = self._fingerprint(self.config_payload)
         self._debug(
-            "client initialized server_url=%s auto_start=%s external_config=%s fingerprint=%s",
+            "client initialized server_url=%s auto_start=%s external_config=%s voice_sync=%s fingerprint=%s",
             self.server_url,
             self.auto_start_server,
             self.allow_external_server_config,
+            self.sync_voice_to_external_worker,
             self.fingerprint[:12],
         )
+
+    def refresh_config(self, config: dict[str, Any]) -> None:
+        previous_payload = getattr(self, "config_payload", {})
+        previous_server_url = getattr(self, "server_url", "")
+        self.config = dict(config or {})
+        self.server_url = str(self.config.get("server_url") or "http://127.0.0.1:8514").rstrip("/")
+        self.auto_start_server = _bool(self.config.get("auto_start_server"), True)
+        self.allow_external_server_config = _bool(
+            self.config.get("allow_external_server_config"), not self.auto_start_server
+        )
+        self.sync_voice_to_external_worker = _bool(
+            self.config.get("sync_voice_to_external_worker"), True
+        )
+        self.host_plugin_data_dir = str(self.config.get("host_plugin_data_dir") or "").strip()
+        self.debug_logging = _bool(self.config.get("debug_logging"), False)
+        self.request_timeout = _float(self.config.get("request_timeout"), 180.0)
+        self.startup_timeout = _float(self.config.get("startup_timeout"), 240.0)
+        self.config_payload = self._build_worker_config()
+        self.fingerprint = self._fingerprint(self.config_payload)
+        if previous_payload != self.config_payload:
+            self._last_synced_voice_payload = ""
+            self._voice_config_endpoint_missing = False
+        if previous_server_url and previous_server_url != self.server_url:
+            self._last_health = None
+
+    def _resolve_worker_file_path(self, value: Any) -> str:
+        raw = first_file_path(value)
+        if not raw:
+            return ""
+        if raw.startswith(("http://", "https://")):
+            return raw
+        expanded = os.path.expanduser(raw)
+        if os.path.isabs(expanded):
+            return expanded
+        base = os.path.expanduser(self.host_plugin_data_dir)
+        if base:
+            return os.path.abspath(os.path.join(base, expanded))
+        return expanded
 
     def _build_worker_config(self) -> dict[str, Any]:
         host, port = _server_parts(self.server_url)
@@ -121,8 +167,10 @@ class QwenLocalTTSClient:
             "hf_home": self.config.get("hf_home") or "",
             "hf_endpoint": self.config.get("hf_endpoint") or "",
             "qwen_repo_dir": self.config.get("qwen_repo_dir") or "",
-            "voice_file": first_file_path(self.config.get("voice_file")),
-            "reference_audio_file": first_file_path(self.config.get("reference_audio_file")),
+            "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
+            "reference_audio_file": self._resolve_worker_file_path(
+                self.config.get("reference_audio_file")
+            ),
             "reference_text": self.config.get("reference_text") or "",
             "x_vector_only_mode": _bool(self.config.get("x_vector_only_mode"), False),
             "language": self.config.get("language") or "Auto",
@@ -154,6 +202,16 @@ class QwenLocalTTSClient:
         if self.debug_logging:
             astrbot_logger.debug("[QwenLocalTTS] " + message, *args)
 
+    def _build_voice_config_payload(self) -> dict[str, Any]:
+        return {
+            "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
+            "reference_audio_file": self._resolve_worker_file_path(
+                self.config.get("reference_audio_file")
+            ),
+            "reference_text": self.config.get("reference_text") or "",
+            "x_vector_only_mode": _bool(self.config.get("x_vector_only_mode"), False),
+        }
+
     async def synthesize(self, text: str, language: str | None = None) -> str:
         text = (text or "").strip()
         if not text:
@@ -168,6 +226,7 @@ class QwenLocalTTSClient:
             resolved_language,
         )
         await self.ensure_server()
+        await self.sync_voice_config()
 
         output_path = os.path.join(
             get_astrbot_temp_path(),
@@ -201,16 +260,70 @@ class QwenLocalTTSClient:
         )
         return output_path
 
+    async def sync_voice_config(self) -> None:
+        if not self.sync_voice_to_external_worker or self._voice_config_endpoint_missing:
+            return
+        payload = self._build_voice_config_payload()
+        raw_payload = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+        if raw_payload == self._last_synced_voice_payload and self._health_matches_voice_payload(payload):
+            return
+        if not payload.get("voice_file") and not payload.get("reference_audio_file"):
+            self._debug("voice config sync skipped because no voice source is configured")
+            self._last_synced_voice_payload = raw_payload
+            return
+
+        self._debug(
+            "syncing voice config voice_file=%s reference_audio=%s",
+            bool(payload.get("voice_file")),
+            bool(payload.get("reference_audio_file")),
+        )
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{self.server_url}/voice_config", json=payload) as resp:
+                data = await resp.read()
+                if resp.status == 404:
+                    self._debug("worker does not support /voice_config; voice sync skipped")
+                    self._voice_config_endpoint_missing = True
+                    self._last_synced_voice_payload = raw_payload
+                    return
+                if resp.status != 200:
+                    detail = data.decode("utf-8", errors="replace")
+                    self._debug("voice config sync failed status=%s detail=%s", resp.status, detail)
+                    raise RuntimeError(f"Qwen local TTS voice sync failed ({resp.status}): {detail}")
+                try:
+                    info = json.loads(data.decode("utf-8"))
+                except json.JSONDecodeError:
+                    info = {}
+        self._last_synced_voice_payload = raw_payload
+        self._debug(
+            "voice config synced voice_file=%s voice_name=%s reference_audio=%s",
+            info.get("voice_file"),
+            info.get("voice_file_name"),
+            info.get("reference_audio_file"),
+        )
+
+    def _health_matches_voice_payload(self, payload: dict[str, Any]) -> bool:
+        health = self._last_health or {}
+        if not health:
+            return False
+        return (
+            str(health.get("voice_file_path") or "") == str(payload.get("voice_file") or "")
+            and str(health.get("reference_audio_path") or "")
+            == str(payload.get("reference_audio_file") or "")
+        )
+
     async def ensure_server(self) -> None:
         self._debug("checking worker health url=%s", self.server_url)
         health = await self._health()
         if health:
+            self._last_health = health
             server_fp = health.get("fingerprint")
             self._debug(
-                "worker health ok fingerprint=%s model=%s voice_file=%s reference_audio=%s",
+                "worker health ok fingerprint=%s model=%s voice_file=%s voice_name=%s reference_audio=%s",
                 str(server_fp or "")[:12],
                 health.get("model"),
                 health.get("voice_file"),
+                health.get("voice_file_name"),
                 health.get("reference_audio_file"),
             )
             if server_fp and server_fp != self.fingerprint:

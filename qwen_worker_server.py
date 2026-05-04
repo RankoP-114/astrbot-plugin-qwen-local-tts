@@ -35,6 +35,13 @@ class SynthesizeRequest(BaseModel):
     language: str = "Auto"
 
 
+class VoiceConfigRequest(BaseModel):
+    voice_file: str = ""
+    reference_audio_file: str = ""
+    reference_text: str = ""
+    x_vector_only_mode: bool = False
+
+
 def dtype_from_str(value: str) -> torch.dtype:
     value = (value or "bfloat16").lower()
     if value in ("bf16", "bfloat16"):
@@ -96,6 +103,29 @@ def active_request_snapshot() -> dict[str, Any] | None:
     started_at = float(snapshot.pop("started_at", time.monotonic()))
     snapshot["elapsed"] = round(time.monotonic() - started_at, 3)
     return snapshot
+
+
+def voice_config_snapshot() -> dict[str, Any]:
+    voice_file = str(CONFIG.get("voice_file") or "")
+    reference_audio_file = str(CONFIG.get("reference_audio_file") or "")
+    return {
+        "voice_file": bool(voice_file),
+        "voice_file_path": voice_file,
+        "voice_file_name": os.path.basename(voice_file) if voice_file else "",
+        "reference_audio_file": bool(reference_audio_file),
+        "reference_audio_path": reference_audio_file,
+        "reference_audio_name": os.path.basename(reference_audio_file) if reference_audio_file else "",
+        "voice_prompt_items": len(VOICE_PROMPT or []),
+    }
+
+
+def is_url_path(path: str) -> bool:
+    return path.startswith(("http://", "https://"))
+
+
+def validate_readable_path(path: str, label: str) -> None:
+    if path and not is_url_path(path) and not os.path.exists(path):
+        raise HTTPException(status_code=400, detail=f"{label} does not exist: {path}")
 
 
 def tensor_or_none(value: Any) -> torch.Tensor | None:
@@ -172,13 +202,51 @@ def health() -> dict[str, Any]:
     return {
         "ok": MODEL is not None,
         "model": CONFIG.get("model"),
-        "voice_file": bool(CONFIG.get("voice_file")),
-        "reference_audio_file": bool(CONFIG.get("reference_audio_file")),
         "debug_logging": debug_enabled(),
         "fingerprint": CONFIG.get("fingerprint", ""),
         "busy": active_request_snapshot() is not None,
         "active_request": active_request_snapshot(),
+        **voice_config_snapshot(),
     }
+
+
+@app.post("/voice_config")
+def update_voice_config(req: VoiceConfigRequest) -> dict[str, Any]:
+    """Hot-load the active voice without reloading the Qwen model."""
+    global VOICE_PROMPT
+    voice_file = (req.voice_file or "").strip()
+    reference_audio_file = (req.reference_audio_file or "").strip()
+    validate_readable_path(voice_file, "voice_file")
+    validate_readable_path(reference_audio_file, "reference_audio_file")
+
+    started_at = time.monotonic()
+    debug_log(
+        "voice config update begin voice_file=%s reference_audio=%s",
+        bool(voice_file),
+        bool(reference_audio_file),
+    )
+    with LOCK:
+        try:
+            loaded_voice_prompt = load_voice_prompt(voice_file) if voice_file else None
+        except Exception as exc:
+            if debug_enabled():
+                LOGGER.exception("[QwenWorker] voice config update failed")
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+        VOICE_PROMPT = loaded_voice_prompt
+        CONFIG["voice_file"] = voice_file
+        CONFIG["reference_audio_file"] = reference_audio_file
+        CONFIG["reference_text"] = req.reference_text or ""
+        CONFIG["x_vector_only_mode"] = bool(req.x_vector_only_mode)
+
+    snapshot = voice_config_snapshot()
+    debug_log(
+        "voice config update done voice_file=%s reference_audio=%s items=%s elapsed=%.3fs",
+        snapshot["voice_file"],
+        snapshot["reference_audio_file"],
+        snapshot["voice_prompt_items"],
+        time.monotonic() - started_at,
+    )
+    return {"ok": True, **snapshot}
 
 
 @app.post("/synthesize")

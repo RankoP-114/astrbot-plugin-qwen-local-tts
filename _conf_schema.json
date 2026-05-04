@@ -17,6 +17,18 @@
     "default": true,
     "hint": "当 AstrBot 在 Docker 中运行，并访问 macOS 宿主机上已启动的 Qwen Worker 时开启。开启后不会要求插件配置与 Worker 指纹完全一致。"
   },
+  "sync_voice_to_external_worker": {
+    "description": "同步后台音色到外部 Worker",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，每次生成前会把 AstrBot 后台当前选择的音色文件热加载到宿主机 Worker。适合 AstrBot 在 Docker 中、Qwen 在本机运行的部署。"
+  },
+  "host_plugin_data_dir": {
+    "description": "宿主机插件数据目录",
+    "type": "string",
+    "default": "",
+    "hint": "当 AstrBot 后台上传音色得到 files/voice_file/*.pt 这类相对路径时，填写宿主机上对应的 plugin_data/astrbot_plugin_qwen_local_tts 目录。留空则按原路径传给 Worker。"
+  },
   "debug_logging": {
     "description": "启用 Debug 日志",
     "type": "bool",

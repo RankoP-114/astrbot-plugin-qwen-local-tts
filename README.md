@@ -15,6 +15,7 @@
 - 支持“用语音回答”“用中文说”“用日语说”等自然语言触发：先调用 AstrBot 当前 LLM 生成回复，再把回复转成 QQ 语音。
 - 群聊默认必须 @ 机器人后才会触发，避免误把普通群聊内容转成语音。
 - 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
+- 支持 AstrBot 后台更换音色后自动热同步到宿主机 Worker，无需每次重启 Worker。
 - 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
 - 提供可开关的 Debug 日志，便于排查 Docker 连通性、Worker 启动和语音生成错误。
 
@@ -42,9 +43,11 @@ QQ / OneBot
 2. 进入 `Save / Load Voice`。
 3. 上传参考音频，并填写对应的准确文本。
 4. 点击 `Save Voice File`。
-5. 将保存出的 `voice_clone_prompt_*.pt` 路径填入宿主机 Worker 配置里的 `voice_file`。
+5. 在 AstrBot 插件后台的“Qwen 音色文件”中上传或选择保存出的 `voice_clone_prompt_*.pt`。
 
 也可以直接配置 `reference_audio_file` 和 `reference_text` 作为备用方案，但每次生成时都需要处理参考音频，速度通常不如 `.pt` 音色文件。
+
+如果 AstrBot 在 Docker 中运行、Qwen Worker 在宿主机运行，请同时填写“宿主机插件数据目录”，让插件能把后台的 `files/voice_file/*.pt` 相对路径转换成宿主机绝对路径。
 
 ### 部署：AstrBot 在 Docker，Qwen 在本机
 
@@ -79,7 +82,7 @@ cp host_worker_config.example.json host_worker_config.local.json
 {
   "host": "0.0.0.0",
   "port": 8514,
-  "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
+  "voice_file": "",
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -90,7 +93,7 @@ cp host_worker_config.example.json host_worker_config.local.json
 说明：
 
 - `host` 要保持 `0.0.0.0`，这样 Docker 容器才能访问宿主机 Worker。
-- `voice_file` 是宿主机上的文件路径，不是 Docker 容器里的路径。
+- `voice_file` 可以留空；如果开启后台音色同步，插件会在生成前通过 `/voice_config` 把当前音色热加载到 Worker。
 - `hf_home` 可以留空，也可以设置为宿主机上的 Hugging Face 缓存目录。
 - `fingerprint` 可保持示例值；Docker 模式下插件配置会信任外部 Worker。
 
@@ -148,11 +151,15 @@ pip install -r data/plugins/astrbot-plugin-qwen-local-tts/requirements.txt
 server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
+sync_voice_to_external_worker = true
+host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts
 debug_logging = false
 require_at_in_group = true
 auto_detect_language = true
 voice_reply_max_chars = 220
 ```
+
+其中 `host_plugin_data_dir` 要填写宿主机上的真实目录，不是 Docker 容器里的路径。这个目录下面应能看到 `files/voice_file/voice_clone_prompt_*.pt`。
 
 本插件不注册 AstrBot Provider，QQ 中直接使用 `/qwentts` 指令。
 
@@ -183,9 +190,10 @@ voice_reply_max_chars = 220
 用语音回答 介绍一下你自己
 用中文说 讲个很短的早安
 用日语说 夸我一句
+用日文说 介绍一下你自己
 ```
 
-`lang` 支持 `auto`、`chinese`、`english`、`japanese`、`korean`、`french`、`german`、`spanish`、`portuguese`、`russian`、`italian`，也支持 `中文`、`日语`、`英语` 等中文写法。
+`lang` 支持 `auto`、`chinese`、`english`、`japanese`、`korean`、`french`、`german`、`spanish`、`portuguese`、`russian`、`italian`，也支持 `中文`、`日语`、`日文`、`英语` 等中文写法。
 
 注意：QQ 官方机器人接口可能不支持语音消息。推荐使用 QQ 个人号 / OneBot v11 平台，例如 NapCat 或 aiocqhttp。
 
@@ -210,7 +218,23 @@ extra_hosts:
 
 #### 生成失败：找不到音色文件
 
-`voice_file` 必须写在宿主机 Worker 配置中，并且路径必须是宿主机真实存在的绝对路径。不要把宿主机音色路径填到 Docker 容器内的插件配置里。
+如果开启了“同步后台音色到外部 Worker”，请确认：
+
+- AstrBot 后台的“Qwen 音色文件”已经选择了 `voice_clone_prompt_*.pt`。
+- “宿主机插件数据目录”填写的是宿主机真实目录，例如 `/path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts`。
+- 该目录下能找到 `files/voice_file/voice_clone_prompt_*.pt`。
+
+如果不开启同步，则 `voice_file` 必须写在宿主机 Worker 配置中，并且路径必须是宿主机真实存在的绝对路径。不要把宿主机音色路径填到 Docker 容器内的插件配置里。
+
+#### 后台换音色不生效
+
+开启 `sync_voice_to_external_worker` 后，插件会在每次生成前调用宿主机 Worker 的 `/voice_config` 接口热加载当前音色。旧版本 Worker 不支持该接口，或 `host_plugin_data_dir` 未填写时，Worker 可能仍然使用启动时的旧音色。
+
+#### 私聊和群聊音色听起来不一样
+
+如果后台刚换过音色，最常见原因是 AstrBot 后台配置已更新，但宿主机 Worker 仍在使用旧的 `voice_file`。开启音色同步并确认 Worker 已更新后，私聊和群聊会使用同一个 Worker 音色。
+
+仍有轻微差异时，通常不是不同音色文件，而是以下因素造成的：私聊和群聊给 LLM 的上下文不同，LLM 返回文本长短和语气不同；Qwen3-TTS 的采样也会让相同音色在不同文本上产生不同的语速、情绪和音高。
 
 #### 首次生成很慢
 
@@ -254,6 +278,7 @@ This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance ru
 - Supports natural triggers such as "用语音回答", "用中文说", and "用日语说": the plugin first asks AstrBot's current LLM, then turns the LLM reply into a QQ voice message.
 - Group chats require mentioning the bot by default, so ordinary group messages do not trigger TTS accidentally.
 - Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
+- Automatically hot-syncs the voice selected in AstrBot settings to the host worker before synthesis.
 - Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
 - Provides switchable debug logs for diagnosing Docker connectivity, worker startup, and synthesis errors.
 
@@ -281,9 +306,11 @@ It is recommended to use the `.pt` voice file saved by the Qwen3-TTS WebUI:
 2. Go to `Save / Load Voice`.
 3. Upload the reference audio and fill in the exact transcript.
 4. Click `Save Voice File`.
-5. Put the saved `voice_clone_prompt_*.pt` path into `voice_file` in the host worker config.
+5. Upload or select the saved `voice_clone_prompt_*.pt` in the AstrBot plugin settings.
 
 You can also configure `reference_audio_file` and `reference_text` as a fallback, but that requires processing the reference audio during generation and is usually slower than using the `.pt` voice file.
+
+If AstrBot runs in Docker while the Qwen worker runs on the host, also set the host plugin data directory so the plugin can translate `files/voice_file/*.pt` from AstrBot settings into a real host path.
 
 ### Deployment: AstrBot in Docker, Qwen on Host
 
@@ -318,7 +345,7 @@ Edit `host_worker_config.local.json` and at least check these fields:
 {
   "host": "0.0.0.0",
   "port": 8514,
-  "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
+  "voice_file": "",
   "device": "mps",
   "dtype": "bfloat16",
   "attn_implementation": "sdpa",
@@ -329,7 +356,7 @@ Edit `host_worker_config.local.json` and at least check these fields:
 Notes:
 
 - Keep `host` as `0.0.0.0` so the Docker container can reach the host worker.
-- `voice_file` is a host filesystem path, not a path inside the Docker container.
+- `voice_file` can be empty; when voice sync is enabled, the plugin calls `/voice_config` before synthesis and hot-loads the current voice into the worker.
 - `hf_home` can be empty, or point to a Hugging Face cache directory on the host.
 - `fingerprint` can keep the example value; Docker mode trusts the external worker config.
 
@@ -387,11 +414,15 @@ Set these values in the plugin config:
 server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
+sync_voice_to_external_worker = true
+host_plugin_data_dir = /path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts
 debug_logging = false
 require_at_in_group = true
 auto_detect_language = true
 voice_reply_max_chars = 220
 ```
+
+`host_plugin_data_dir` must be the real directory on the host, not a path inside the Docker container. It should contain `files/voice_file/voice_clone_prompt_*.pt`.
 
 This plugin does not register an AstrBot provider. Use the `/qwentts` command directly in QQ.
 
@@ -422,9 +453,10 @@ Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
 用语音回答 介绍一下你自己
 用中文说 讲个很短的早安
 用日语说 夸我一句
+用日文说 介绍一下你自己
 ```
 
-`lang` supports `auto`, `chinese`, `english`, `japanese`, `korean`, `french`, `german`, `spanish`, `portuguese`, `russian`, and `italian`, plus Chinese aliases such as `中文`, `日语`, and `英语`.
+`lang` supports `auto`, `chinese`, `english`, `japanese`, `korean`, `french`, `german`, `spanish`, `portuguese`, `russian`, and `italian`, plus Chinese aliases such as `中文`, `日语`, `日文`, and `英语`.
 
 Note: QQ official bot APIs may not support voice messages. QQ personal-account / OneBot v11 platforms such as NapCat or aiocqhttp are the intended targets.
 
@@ -449,7 +481,23 @@ extra_hosts:
 
 #### Voice File Not Found
 
-`voice_file` must be set in the host worker config, and it must be a real absolute path on the host. Do not put the host voice path into the plugin config inside Docker.
+If voice sync is enabled, check that:
+
+- The AstrBot plugin setting selects a `voice_clone_prompt_*.pt` file.
+- `host_plugin_data_dir` points to the real host directory, for example `/path/to/AstrBot/data/plugin_data/astrbot_plugin_qwen_local_tts`.
+- The file exists under `files/voice_file/voice_clone_prompt_*.pt` inside that directory.
+
+If voice sync is disabled, `voice_file` must be set in the host worker config, and it must be a real absolute path on the host. Do not put the host voice path into the plugin config inside Docker.
+
+#### Voice Changes Do Not Take Effect
+
+With `sync_voice_to_external_worker` enabled, the plugin calls the host worker's `/voice_config` endpoint before each synthesis request. Older workers do not support this endpoint, and an empty `host_plugin_data_dir` can leave the worker using the voice file it loaded at startup.
+
+#### Private and Group Chats Sound Different
+
+Right after changing the voice, the most common cause is that AstrBot settings changed but the host worker was still using its old `voice_file`. Once voice sync is enabled and the worker has updated, private and group chats use the same worker voice.
+
+Small remaining differences are usually not different voice files. Private and group chats can send different context to the LLM, so the generated text, length, tone, and punctuation may differ; Qwen3-TTS sampling can also change speed, emotion, and pitch slightly across different text.
 
 #### First Generation Is Slow
 
