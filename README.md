@@ -14,6 +14,7 @@
 - 提供 `/qwentts <文本>` 指令，可在 QQ 中直接测试语音生成。
 - 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
 - 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
+- 提供可开关的 Debug 日志，便于排查 Docker 连通性、Worker 启动和语音生成错误。
 
 ### 架构
 
@@ -79,7 +80,8 @@ cp host_worker_config.example.json host_worker_config.local.json
   "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
   "device": "mps",
   "dtype": "bfloat16",
-  "attn_implementation": "sdpa"
+  "attn_implementation": "sdpa",
+  "debug_logging": false
 }
 ```
 
@@ -144,6 +146,7 @@ pip install -r data/plugins/astrbot-plugin-qwen-local-tts/requirements.txt
 server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
+debug_logging = false
 ```
 
 如果要接入 AstrBot 的自动 TTS 流程，添加或启用 Provider：
@@ -198,6 +201,14 @@ extra_hosts:
 
 本插件不依赖 Qwen3-TTS 的 Gradio WebUI。WebUI 只用于保存音色文件；真正给 AstrBot 用的是 `qwen_worker_server.py`。
 
+#### 如何打开 Debug 日志
+
+如果要排查问题：
+
+- 在 AstrBot 插件配置或 Provider 配置中将 `debug_logging` 改为 `true`，用于打印 AstrBot 侧的健康检查、请求开始/结束、耗时和错误信息。
+- 在宿主机 `host_worker_config.local.json` 中将 `debug_logging` 改为 `true`，用于打印 Qwen Worker 侧的模型加载、音色加载、生成耗时和异常堆栈。
+- Debug 日志只记录文本长度，不记录完整待合成文本。
+
 [返回顶部](#astrbot-plugin-qwen-local-tts)
 
 <a id="english"></a>
@@ -212,6 +223,7 @@ This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance ru
 - Provides `/qwentts <text>` for direct QQ voice-message testing.
 - Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
 - Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
+- Provides switchable debug logs for diagnosing Docker connectivity, worker startup, and synthesis errors.
 
 ### Architecture
 
@@ -277,7 +289,8 @@ Edit `host_worker_config.local.json` and at least check these fields:
   "voice_file": "/absolute/path/to/voice_clone_prompt_xxx.pt",
   "device": "mps",
   "dtype": "bfloat16",
-  "attn_implementation": "sdpa"
+  "attn_implementation": "sdpa",
+  "debug_logging": false
 }
 ```
 
@@ -342,6 +355,7 @@ Set these values in the plugin config or provider config:
 server_url = http://host.docker.internal:8514
 auto_start_server = false
 allow_external_server_config = true
+debug_logging = false
 ```
 
 To use AstrBot's automatic TTS pipeline, add or enable this provider:
@@ -395,5 +409,13 @@ The first worker startup loads the model, and the first generation may trigger c
 #### WebUI Microphone Is Unrelated
 
 This plugin does not depend on the Qwen3-TTS Gradio WebUI. The WebUI is only used to save the voice file; AstrBot talks to `qwen_worker_server.py`.
+
+#### How to Enable Debug Logs
+
+When troubleshooting:
+
+- Set `debug_logging` to `true` in the AstrBot plugin config or provider config to print AstrBot-side health checks, request start/end events, elapsed time, and error details.
+- Set `debug_logging` to `true` in the host `host_worker_config.local.json` to print Qwen worker-side model loading, voice loading, synthesis timing, and exception stack traces.
+- Debug logs record text length only. They do not record the full synthesis text.
 
 [Back to top](#astrbot-plugin-qwen-local-tts)

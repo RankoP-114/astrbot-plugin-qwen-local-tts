@@ -26,6 +26,7 @@ DEFAULT_PROVIDER_CONFIG = {
     "server_url": "http://host.docker.internal:8514",
     "auto_start_server": False,
     "allow_external_server_config": True,
+    "debug_logging": False,
     "python_bin": "",
     "qwen_repo_dir": "",
     "model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",

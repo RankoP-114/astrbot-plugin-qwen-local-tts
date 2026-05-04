@@ -17,6 +17,12 @@
     "default": true,
     "hint": "当 AstrBot 在 Docker 中运行，并访问 macOS 宿主机上已启动的 Qwen Worker 时开启。开启后不会要求插件配置与 Worker 指纹完全一致。"
   },
+  "debug_logging": {
+    "description": "启用 Debug 日志",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后会打印插件侧和 Worker 侧的健康检查、启动、合成请求、耗时和错误信息。日志只记录文本长度，不记录完整待合成文本。"
+  },
   "python_bin": {
     "description": "Qwen3-TTS Python 路径",
     "type": "string",

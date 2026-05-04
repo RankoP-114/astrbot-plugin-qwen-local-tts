@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import logging
 import os
 import threading
-from dataclasses import asdict
+import time
+import uuid
 from typing import Any
 
 import numpy as np
@@ -22,6 +24,7 @@ CONFIG: dict[str, Any] = {}
 MODEL: Qwen3TTSModel | None = None
 VOICE_PROMPT: list[VoiceClonePromptItem] | None = None
 LOCK = threading.Lock()
+LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
 
 
@@ -39,6 +42,29 @@ def dtype_from_str(value: str) -> torch.dtype:
     if value in ("fp32", "float32"):
         return torch.float32
     raise ValueError(f"Unsupported dtype: {value}")
+
+
+def bool_from_config(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "y", "on", "enable", "enabled"):
+            return True
+        if normalized in ("0", "false", "no", "n", "off", "disable", "disabled"):
+            return False
+    return bool(value)
+
+
+def debug_enabled() -> bool:
+    return bool_from_config(CONFIG.get("debug_logging"), False)
+
+
+def debug_log(message: str, *args: Any) -> None:
+    if debug_enabled():
+        LOGGER.debug("[QwenWorker] " + message, *args)
 
 
 def tensor_or_none(value: Any) -> torch.Tensor | None:
@@ -86,6 +112,16 @@ def wav_bytes(wav: np.ndarray, sr: int) -> bytes:
 def startup() -> None:
     global MODEL, VOICE_PROMPT
     model_id = CONFIG.get("model") or "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    started_at = time.monotonic()
+    debug_log(
+        "startup begin model=%s device=%s dtype=%s attn=%s voice_file=%s reference_audio=%s",
+        model_id,
+        CONFIG.get("device") or "mps",
+        CONFIG.get("dtype") or "bfloat16",
+        CONFIG.get("attn_implementation") or "sdpa",
+        bool(CONFIG.get("voice_file")),
+        bool(CONFIG.get("reference_audio_file")),
+    )
     MODEL = Qwen3TTSModel.from_pretrained(
         model_id,
         device_map=CONFIG.get("device") or "mps",
@@ -94,7 +130,10 @@ def startup() -> None:
     )
     voice_file = CONFIG.get("voice_file") or ""
     if voice_file:
+        debug_log("loading voice prompt file")
         VOICE_PROMPT = load_voice_prompt(voice_file)
+        debug_log("voice prompt loaded items=%s", len(VOICE_PROMPT))
+    debug_log("startup complete elapsed=%.3fs", time.monotonic() - started_at)
 
 
 @app.get("/health")
@@ -104,6 +143,7 @@ def health() -> dict[str, Any]:
         "model": CONFIG.get("model"),
         "voice_file": bool(CONFIG.get("voice_file")),
         "reference_audio_file": bool(CONFIG.get("reference_audio_file")),
+        "debug_logging": debug_enabled(),
         "fingerprint": CONFIG.get("fingerprint", ""),
     }
 
@@ -116,8 +156,18 @@ def synthesize(req: SynthesizeRequest) -> Response:
     if not text:
         raise HTTPException(status_code=400, detail="Text is empty.")
 
+    request_id = uuid.uuid4().hex[:8]
+    started_at = time.monotonic()
     language = (req.language or CONFIG.get("language") or "Auto").strip() or "Auto"
     generation = dict(CONFIG.get("generation") or {})
+    source = "voice_prompt" if VOICE_PROMPT else "reference_audio"
+    debug_log(
+        "request %s synthesize start text_len=%s language=%s source=%s",
+        request_id,
+        len(text),
+        language,
+        source,
+    )
 
     with LOCK:
         try:
@@ -145,8 +195,19 @@ def synthesize(req: SynthesizeRequest) -> Response:
                     **generation,
                 )
         except Exception as exc:
+            if debug_enabled():
+                LOGGER.exception("[QwenWorker] request %s synthesize failed", request_id)
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
-    return Response(content=wav_bytes(wavs[0], sr), media_type="audio/wav")
+    audio = wav_bytes(wavs[0], sr)
+    debug_log(
+        "request %s synthesize done sr=%s wavs=%s bytes=%s elapsed=%.3fs",
+        request_id,
+        sr,
+        len(wavs),
+        len(audio),
+        time.monotonic() - started_at,
+    )
+    return Response(content=audio, media_type="audio/wav")
 
 
 def main() -> int:
@@ -158,6 +219,18 @@ def main() -> int:
     with open(args.config, "r", encoding="utf-8") as f:
         CONFIG = json.load(f)
 
+    debug = debug_enabled()
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    debug_log(
+        "config loaded host=%s port=%s fingerprint=%s",
+        CONFIG.get("host") or "127.0.0.1",
+        int(CONFIG.get("port") or 8514),
+        str(CONFIG.get("fingerprint") or "")[:12],
+    )
+
     if CONFIG.get("hf_home"):
         os.environ["HF_HOME"] = str(CONFIG["hf_home"])
     if CONFIG.get("hf_endpoint"):
@@ -168,7 +241,7 @@ def main() -> int:
         app,
         host=CONFIG.get("host") or "127.0.0.1",
         port=int(CONFIG.get("port") or 8514),
-        log_level="info",
+        log_level="debug" if debug else "info",
     )
     return 0
 
