@@ -86,6 +86,10 @@ LANGUAGE_PREFIX_RE = re.compile(
     r"^(?:lang|language|语言)\s*=\s*([^\s]+)\s*",
     re.IGNORECASE,
 )
+QWENTTS_COMMAND_RE = re.compile(
+    r"(?:^|\s)/?qwentts(?:\s+|$)(?P<text>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
 LEADING_LANGUAGE_REQUEST_RE = re.compile(
     rf"^(?:请)?用(?P<lang>{LANGUAGE_PATTERN})(?:语音)?"
     r"(?P<verb>回答|回复|说|讲)(?:一下)?[：:，,\s]*(?P<prompt>.+)$",
@@ -159,14 +163,15 @@ class QwenLocalTTSPlugin(Star):
         self.client = QwenLocalTTSClient(dict(config or {}))
 
     @filter.command("qwentts")
-    async def qwentts(self, event: AstrMessageEvent, text: str):
+    async def qwentts(self, event: AstrMessageEvent, text: str = ""):
         """Use the configured Qwen voice file to generate a QQ voice message."""
         if self._requires_at_but_missing(event):
             self._debug("skip /qwentts in group because bot was not mentioned")
             return
 
         event.stop_event()
-        language_override, text = self._parse_language_option(text or "")
+        text = self._qwentts_command_text(event, text)
+        language_override, text = self._parse_language_option(text)
         language = self._resolve_language(text, language_override)
         if not text:
             yield event.plain_result("用法：/qwentts [lang=chinese] 要合成的文本")
@@ -275,6 +280,13 @@ class QwenLocalTTSPlugin(Star):
             return (event.get_message_str() or "").strip()
         except Exception:
             return (getattr(event, "message_str", "") or "").strip()
+
+    def _qwentts_command_text(self, event: AstrMessageEvent, text_arg: str = "") -> str:
+        raw = self._message_text(event)
+        match = QWENTTS_COMMAND_RE.search(raw)
+        if match:
+            return match.group("text").strip()
+        return (text_arg or "").strip()
 
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         try:
