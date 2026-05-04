@@ -62,6 +62,16 @@ class VoiceConfigRequest(BaseModel):
     x_vector_only_mode: bool = False
 
 
+class OpenAISpeechRequest(BaseModel):
+    model: str = "qwen-local-tts"
+    input: str
+    voice: Any = "default"
+    response_format: str = "wav"
+    speed: Optional[float] = None
+    instructions: str = ""
+    stream_format: str = "audio"
+
+
 @dataclass
 class SynthesisJob:
     request_id: str
@@ -139,6 +149,19 @@ def require_worker_token(request: Request) -> None:
     expected = str(CONFIG.get("worker_token") or "").strip()
     if expected and request.headers.get("X-Qwen-Worker-Token") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_openai_or_worker_token(request: Request) -> None:
+    expected = str(CONFIG.get("worker_token") or "").strip()
+    if not expected:
+        return
+    if request.headers.get("X-Qwen-Worker-Token") == expected:
+        return
+    authorization = request.headers.get("Authorization") or ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token.strip() == expected:
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def set_active_request(
@@ -584,9 +607,7 @@ def update_voice_config(req: VoiceConfigRequest, request: Request) -> dict[str, 
     return {"ok": True, **snapshot}
 
 
-@app.post("/synthesize")
-def synthesize(req: SynthesizeRequest, request: Request) -> Response:
-    require_worker_token(request)
+def enqueue_synthesis(req: SynthesizeRequest) -> bytes:
     if MODEL is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
     text = (req.text or "").strip()
@@ -650,7 +671,46 @@ def synthesize(req: SynthesizeRequest, request: Request) -> Response:
             status_code=500,
             detail=f"{type(job.error).__name__}: {job.error}",
         ) from job.error
-    return Response(content=job.result or b"", media_type="audio/wav")
+    return job.result or b""
+
+
+@app.post("/synthesize")
+def synthesize(req: SynthesizeRequest, request: Request) -> Response:
+    require_worker_token(request)
+    return Response(content=enqueue_synthesis(req), media_type="audio/wav")
+
+
+@app.post("/v1/audio/speech")
+def openai_speech(req: OpenAISpeechRequest, request: Request) -> Response:
+    require_openai_or_worker_token(request)
+    response_format = (req.response_format or "wav").strip().lower()
+    if response_format != "wav":
+        raise HTTPException(
+            status_code=400,
+            detail="Only response_format='wav' is supported by this local Qwen TTS endpoint.",
+        )
+    stream_format = (req.stream_format or "audio").strip().lower()
+    if stream_format not in ("audio", ""):
+        raise HTTPException(
+            status_code=400,
+            detail="Only stream_format='audio' is supported by this local Qwen TTS endpoint.",
+        )
+    text = (req.input or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Input is empty.")
+    debug_log(
+        "openai speech request model=%s voice=%s text_len=%s instructions=%s speed=%s",
+        req.model,
+        req.voice,
+        len(text),
+        bool((req.instructions or "").strip()),
+        req.speed,
+    )
+    synth_req = SynthesizeRequest(
+        text=text,
+        language=(CONFIG.get("language") or "Auto").strip() or "Auto",
+    )
+    return Response(content=enqueue_synthesis(synth_req), media_type="audio/wav")
 
 
 def main() -> int:
