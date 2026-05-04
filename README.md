@@ -16,6 +16,7 @@
 - 群聊默认必须 @ 机器人后才会触发，避免误把普通群聊内容转成语音。
 - 支持使用 Qwen3-TTS WebUI 保存出的 `voice_clone_prompt_*.pt` 音色文件。
 - 支持 AstrBot 后台更换音色后自动热同步到宿主机 Worker，无需每次重启 Worker。
+- 支持为中文、日语、英语分别配置不同 `.pt` 音色文件。
 - 推荐部署方式：AstrBot 在 Docker 中运行，Qwen3-TTS 在宿主机本地运行，Docker 只通过 HTTP 调用。
 - 提供可开关的 Debug 日志，便于排查 Docker 连通性、Worker 启动和语音生成错误。
 
@@ -48,6 +49,15 @@ QQ / OneBot
 也可以直接配置 `reference_audio_file` 和 `reference_text` 作为备用方案，但每次生成时都需要处理参考音频，速度通常不如 `.pt` 音色文件。
 
 如果 AstrBot 在 Docker 中运行、Qwen Worker 在宿主机运行，请同时填写“宿主机插件数据目录”，让插件能把后台的 `files/voice_file/*.pt` 相对路径转换成宿主机绝对路径。
+
+插件后台可以单独配置：
+
+- `Qwen 音色文件`：通用兜底音色。
+- `中文专用音色文件`：语言为 `Chinese` 或“用中文说”时优先使用。
+- `日语专用音色文件`：语言为 `Japanese` 或“用日语说/用日文说”时优先使用。
+- `英语专用音色文件`：语言为 `English` 或“用英语说/用英文说”时优先使用。
+
+专用音色留空时，会自动回退到通用音色。
 
 ### 部署：AstrBot 在 Docker，Qwen 在本机
 
@@ -182,6 +192,7 @@ voice_reply_max_chars = 220
 ```text
 /qwentts [lang=chinese] 你好，我是茉莉。
 /qwentts [lang=japanese] おはようございます。
+/qwentts [lang=english] Good morning.
 ```
 
 自然语言触发会先让 AstrBot 当前 LLM 回答，再把 LLM 的回答转成语音：
@@ -191,6 +202,7 @@ voice_reply_max_chars = 220
 用中文说 讲个很短的早安
 用日语说 夸我一句
 用日文说 介绍一下你自己
+用英语说 介绍一下你自己
 ```
 
 `lang` 支持 `auto`、`chinese`、`english`、`japanese`、`korean`、`french`、`german`、`spanish`、`portuguese`、`russian`、`italian`，也支持 `中文`、`日语`、`日文`、`英语` 等中文写法。
@@ -279,6 +291,7 @@ This plugin lets AstrBot generate QQ voice messages with a Qwen3-TTS instance ru
 - Group chats require mentioning the bot by default, so ordinary group messages do not trigger TTS accidentally.
 - Supports `voice_clone_prompt_*.pt` voice files saved from the Qwen3-TTS WebUI.
 - Automatically hot-syncs the voice selected in AstrBot settings to the host worker before synthesis.
+- Supports separate `.pt` voice files for Chinese, Japanese, and English.
 - Recommended deployment: run AstrBot in Docker, run Qwen3-TTS on the host, and let Docker call it over HTTP.
 - Provides switchable debug logs for diagnosing Docker connectivity, worker startup, and synthesis errors.
 
@@ -311,6 +324,15 @@ It is recommended to use the `.pt` voice file saved by the Qwen3-TTS WebUI:
 You can also configure `reference_audio_file` and `reference_text` as a fallback, but that requires processing the reference audio during generation and is usually slower than using the `.pt` voice file.
 
 If AstrBot runs in Docker while the Qwen worker runs on the host, also set the host plugin data directory so the plugin can translate `files/voice_file/*.pt` from AstrBot settings into a real host path.
+
+The plugin settings can hold separate voices:
+
+- `Qwen 音色文件`: the default fallback voice.
+- `中文专用音色文件`: used first when the language is `Chinese` or the message says "用中文说".
+- `日语专用音色文件`: used first when the language is `Japanese` or the message says "用日语说/用日文说".
+- `英语专用音色文件`: used first when the language is `English` or the message says "用英语说/用英文说".
+
+If a language-specific voice is empty, the plugin falls back to the default voice.
 
 ### Deployment: AstrBot in Docker, Qwen on Host
 
@@ -445,6 +467,7 @@ Override the language for one message:
 ```text
 /qwentts [lang=chinese] 你好，我是茉莉。
 /qwentts [lang=japanese] おはようございます。
+/qwentts [lang=english] Good morning.
 ```
 
 Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
@@ -454,6 +477,7 @@ Natural triggers ask AstrBot's current LLM first, then synthesize the LLM reply:
 用中文说 讲个很短的早安
 用日语说 夸我一句
 用日文说 介绍一下你自己
+用英语说 介绍一下你自己
 ```
 
 `lang` supports `auto`, `chinese`, `english`, `japanese`, `korean`, `french`, `german`, `spanish`, `portuguese`, `russian`, and `italian`, plus Chinese aliases such as `中文`, `日语`, `日文`, and `英语`.

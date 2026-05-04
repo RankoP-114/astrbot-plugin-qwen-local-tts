@@ -28,6 +28,11 @@ except Exception:  # pragma: no cover - lets the helper be unit-tested outside A
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 WORKER_PATH = PLUGIN_DIR / "qwen_worker_server.py"
+VOICE_FILE_BY_LANGUAGE = {
+    "Chinese": "voice_file_chinese",
+    "Japanese": "voice_file_japanese",
+    "English": "voice_file_english",
+}
 
 
 def first_file_path(value: Any) -> str:
@@ -155,6 +160,14 @@ class QwenLocalTTSClient:
             return os.path.abspath(os.path.join(base, expanded))
         return expanded
 
+    def _voice_file_for_language(self, language: str | None) -> tuple[str, str]:
+        language_key = (language or "").strip()
+        config_key = VOICE_FILE_BY_LANGUAGE.get(language_key, "voice_file")
+        voice_file = first_file_path(self.config.get(config_key))
+        if voice_file:
+            return config_key, voice_file
+        return "voice_file", first_file_path(self.config.get("voice_file"))
+
     def _build_worker_config(self) -> dict[str, Any]:
         host, port = _server_parts(self.server_url)
         payload = {
@@ -202,9 +215,11 @@ class QwenLocalTTSClient:
         if self.debug_logging:
             astrbot_logger.debug("[QwenLocalTTS] " + message, *args)
 
-    def _build_voice_config_payload(self) -> dict[str, Any]:
+    def _build_voice_config_payload(self, language: str | None = None) -> dict[str, Any]:
+        voice_key, voice_file = self._voice_file_for_language(language)
         return {
-            "voice_file": self._resolve_worker_file_path(self.config.get("voice_file")),
+            "voice_file": self._resolve_worker_file_path(voice_file),
+            "voice_key": voice_key,
             "reference_audio_file": self._resolve_worker_file_path(
                 self.config.get("reference_audio_file")
             ),
@@ -226,7 +241,7 @@ class QwenLocalTTSClient:
             resolved_language,
         )
         await self.ensure_server()
-        await self.sync_voice_config()
+        await self.sync_voice_config(resolved_language)
 
         output_path = os.path.join(
             get_astrbot_temp_path(),
@@ -260,26 +275,30 @@ class QwenLocalTTSClient:
         )
         return output_path
 
-    async def sync_voice_config(self) -> None:
+    async def sync_voice_config(self, language: str | None = None) -> None:
         if not self.sync_voice_to_external_worker or self._voice_config_endpoint_missing:
             return
-        payload = self._build_voice_config_payload()
-        raw_payload = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
-        if raw_payload == self._last_synced_voice_payload and self._health_matches_voice_payload(payload):
+        payload = self._build_voice_config_payload(language)
+        worker_payload = dict(payload)
+        voice_key = str(worker_payload.pop("voice_key", "voice_file"))
+        raw_payload = json.dumps(worker_payload, sort_keys=True, ensure_ascii=True, default=str)
+        if raw_payload == self._last_synced_voice_payload and self._health_matches_voice_payload(worker_payload):
             return
-        if not payload.get("voice_file") and not payload.get("reference_audio_file"):
+        if not worker_payload.get("voice_file") and not worker_payload.get("reference_audio_file"):
             self._debug("voice config sync skipped because no voice source is configured")
             self._last_synced_voice_payload = raw_payload
             return
 
         self._debug(
-            "syncing voice config voice_file=%s reference_audio=%s",
-            bool(payload.get("voice_file")),
-            bool(payload.get("reference_audio_file")),
+            "syncing voice config language=%s voice_key=%s voice_file=%s reference_audio=%s",
+            language or "Auto",
+            voice_key,
+            bool(worker_payload.get("voice_file")),
+            bool(worker_payload.get("reference_audio_file")),
         )
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{self.server_url}/voice_config", json=payload) as resp:
+            async with session.post(f"{self.server_url}/voice_config", json=worker_payload) as resp:
                 data = await resp.read()
                 if resp.status == 404:
                     self._debug("worker does not support /voice_config; voice sync skipped")
@@ -295,8 +314,10 @@ class QwenLocalTTSClient:
                 except json.JSONDecodeError:
                     info = {}
         self._last_synced_voice_payload = raw_payload
+        self._last_health = {**(self._last_health or {}), **info}
         self._debug(
-            "voice config synced voice_file=%s voice_name=%s reference_audio=%s",
+            "voice config synced voice_key=%s voice_file=%s voice_name=%s reference_audio=%s",
+            voice_key,
             info.get("voice_file"),
             info.get("voice_file_name"),
             info.get("reference_audio_file"),

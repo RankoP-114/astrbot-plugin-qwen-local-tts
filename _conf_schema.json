@@ -96,7 +96,28 @@
     "type": "file",
     "default": [],
     "file_types": ["pt", "pth"],
-    "hint": "上传 Qwen3-TTS WebUI 的 Save Voice File 保存出来的 voice_clone_prompt_*.pt 文件。优先使用该文件生成语音。"
+    "hint": "通用兜底音色。上传 Qwen3-TTS WebUI 的 Save Voice File 保存出来的 voice_clone_prompt_*.pt 文件。"
+  },
+  "voice_file_chinese": {
+    "description": "中文专用音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "合成语言为 Chinese，或触发“用中文说”时优先使用。留空则使用通用 Qwen 音色文件。"
+  },
+  "voice_file_japanese": {
+    "description": "日语专用音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "合成语言为 Japanese，或触发“用日语说/用日文说”时优先使用。留空则使用通用 Qwen 音色文件。"
+  },
+  "voice_file_english": {
+    "description": "英语专用音色文件",
+    "type": "file",
+    "default": [],
+    "file_types": ["pt", "pth"],
+    "hint": "合成语言为 English，或触发“用英语说/用英文说”时优先使用。留空则使用通用 Qwen 音色文件。"
   },
   "reference_audio_file": {
     "description": "备用参考音频",
