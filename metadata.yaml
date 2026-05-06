@@ -3,6 +3,7 @@ display_name: Qwen Local TTS
 desc: Generate QQ voice messages with a local Qwen3-TTS voice file.
 version: v0.1.0
 author: RankoP-114
+license: AGPL-3.0-or-later
 repo: https://github.com/RankoP-114/astrbot-plugin-qwen-local-tts
 support_platforms:
   - aiocqhttp

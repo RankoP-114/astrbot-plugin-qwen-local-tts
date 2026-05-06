@@ -241,13 +241,23 @@ voice_reply_max_chars = 220
 
 ### OpenAI TTS 兼容接口
 
-宿主机 Worker 还提供一个不影响 AstrBot 的旁路接口：
+宿主机 Worker 还提供一组不影响 AstrBot 的旁路接口：
 
 ```text
+GET  http://127.0.0.1:8514/v1/models
 POST http://127.0.0.1:8514/v1/audio/speech
 ```
 
 它复用 Worker 默认配置中的 `voice_file` 或 `reference_audio_file`，不会读取请求里的 `voice` 来切换音色。当前只返回 WAV；如果设置了 `worker_token`，可以使用 OpenAI 风格的 `Authorization: Bearer <token>`，也可以继续使用 `X-Qwen-Worker-Token`。
+
+查看模型列表：
+
+```bash
+curl http://127.0.0.1:8514/v1/models \
+  -H "Authorization: Bearer <worker_token>"
+```
+
+返回会包含 `qwen-local-tts` 和 Worker 当前配置里的真实 Qwen 模型 ID。
 
 ```bash
 curl http://127.0.0.1:8514/v1/audio/speech \
@@ -268,6 +278,7 @@ OpenAI Python SDK 示例：
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8514/v1", api_key="<worker_token>")
+models = client.models.list()
 audio = client.audio.speech.create(
     model="qwen-local-tts",
     voice="default",
@@ -276,6 +287,12 @@ audio = client.audio.speech.create(
 )
 audio.write_to_file("qwen-local.wav")
 ```
+
+### 许可证
+
+本仓库的插件代码以 `AGPL-3.0-or-later` 开源，详见 [LICENSE](LICENSE)。
+
+本仓库不包含 Qwen3-TTS 模型权重、Hugging Face 缓存模型、用户上传的参考音频或 `voice_clone_prompt_*.pt` 音色文件。`Qwen/Qwen3-TTS-12Hz-1.7B-Base` 模型由 Qwen 团队单独以 `Apache-2.0` 许可发布；使用或再分发模型时，请遵守 Qwen 模型仓库的许可证、版权和 NOTICE 要求。
 
 ### 常见问题
 
@@ -585,13 +602,23 @@ Note: QQ official bot APIs may not support voice messages. QQ personal-account /
 
 ### OpenAI TTS-Compatible Endpoint
 
-The host worker also provides a sidecar endpoint that does not change AstrBot behavior:
+The host worker also provides sidecar endpoints that do not change AstrBot behavior:
 
 ```text
+GET  http://127.0.0.1:8514/v1/models
 POST http://127.0.0.1:8514/v1/audio/speech
 ```
 
 It reuses the worker's default `voice_file` or `reference_audio_file`; the request `voice` field is accepted for OpenAI compatibility but does not switch voices. The endpoint currently returns WAV only. When `worker_token` is configured, use `Authorization: Bearer <token>` or the existing `X-Qwen-Worker-Token` header.
+
+List models:
+
+```bash
+curl http://127.0.0.1:8514/v1/models \
+  -H "Authorization: Bearer <worker_token>"
+```
+
+The response includes `qwen-local-tts` and the real Qwen model ID configured in the worker.
 
 ```bash
 curl http://127.0.0.1:8514/v1/audio/speech \
@@ -612,6 +639,7 @@ OpenAI Python SDK example:
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8514/v1", api_key="<worker_token>")
+models = client.models.list()
 audio = client.audio.speech.create(
     model="qwen-local-tts",
     voice="default",
@@ -620,6 +648,12 @@ audio = client.audio.speech.create(
 )
 audio.write_to_file("qwen-local.wav")
 ```
+
+### License
+
+The plugin code in this repository is licensed under `AGPL-3.0-or-later`; see [LICENSE](LICENSE).
+
+This repository does not include Qwen3-TTS model weights, Hugging Face cached models, user-uploaded reference audio, or `voice_clone_prompt_*.pt` voice files. The `Qwen/Qwen3-TTS-12Hz-1.7B-Base` model is licensed separately by the Qwen team under `Apache-2.0`; when using or redistributing the model, follow the license, copyright, and NOTICE requirements from the Qwen model repository.
 
 ### Troubleshooting
 

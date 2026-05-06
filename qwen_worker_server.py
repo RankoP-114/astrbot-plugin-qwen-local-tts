@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -39,6 +41,7 @@ CANCELLED_QUEUED_REQUESTS = 0
 ORPHANED_ACTIVE_REQUESTS = 0
 LAST_TIMED_OUT_REQUEST: dict[str, Any] | None = None
 SYNTHESIS_THREAD: threading.Thread | None = None
+WORKER_STARTED_AT = int(time.time())
 LOGGER = logging.getLogger("qwen_local_tts_worker")
 app = FastAPI(title="Qwen Local TTS Worker")
 
@@ -162,6 +165,27 @@ def require_openai_or_worker_token(request: Request) -> None:
     if scheme.lower() == "bearer" and token.strip() == expected:
         return
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def openai_model_ids() -> list[str]:
+    configured = str(CONFIG.get("model") or "Qwen/Qwen3-TTS-12Hz-1.7B-Base").strip()
+    model_ids = ["qwen-local-tts"]
+    if configured and configured not in model_ids:
+        model_ids.append(configured)
+    for value in CONFIG.get("openai_model_aliases") or []:
+        model_id = str(value or "").strip()
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return model_ids
+
+
+def openai_model_object(model_id: str) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": WORKER_STARTED_AT,
+        "owned_by": "qwen-local-tts",
+    }
 
 
 def set_active_request(
@@ -711,6 +735,24 @@ def openai_speech(req: OpenAISpeechRequest, request: Request) -> Response:
         language=(CONFIG.get("language") or "Auto").strip() or "Auto",
     )
     return Response(content=enqueue_synthesis(synth_req), media_type="audio/wav")
+
+
+@app.get("/v1/models")
+def openai_models(request: Request) -> dict[str, Any]:
+    require_openai_or_worker_token(request)
+    return {
+        "object": "list",
+        "data": [openai_model_object(model_id) for model_id in openai_model_ids()],
+    }
+
+
+@app.get("/v1/models/{model_id:path}")
+def openai_retrieve_model(model_id: str, request: Request) -> dict[str, Any]:
+    require_openai_or_worker_token(request)
+    decoded_model_id = model_id.strip()
+    if decoded_model_id not in openai_model_ids():
+        raise HTTPException(status_code=404, detail=f"Model not found: {decoded_model_id}")
+    return openai_model_object(decoded_model_id)
 
 
 def main() -> int:

@@ -1,5 +1,24 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.env
+
+# Local runtime config and generated audio.
 host_worker_config.local.json
-*.log
+*.wav
+*.mp3
+*.opus
+*.aac
+
+# Do not commit user voices or model weights.
+voice_clone_prompt_*.pt
+files/voice_file/
+plugin_data/
+models/
+hf_cache/
+*.safetensors
+*.ckpt
+*.pth
+*.onnx
+*.gguf
+Qwen3-TTS-*/
